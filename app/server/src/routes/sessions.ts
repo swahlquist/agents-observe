@@ -32,6 +32,8 @@ function rowToRecentSession(r: any) {
     projectName: r.project_name,
     projectSlug: r.project_slug,
     slug: r.slug,
+    intent: r.intent ?? null,
+    intentSource: (r.intent_source as 'manual' | 'auto' | null) ?? null,
     transcriptPath: r.transcript_path || null,
     startCwd: r.start_cwd || null,
     status: deriveSessionStatus(r.stopped_at),
@@ -76,6 +78,8 @@ router.get('/sessions/:id', async (c) => {
     projectSlug: row.project_slug,
     projectName: row.project_name,
     slug: row.slug,
+    intent: row.intent ?? null,
+    intentSource: (row.intent_source as 'manual' | 'auto' | null) ?? null,
     status: deriveSessionStatus(row.stopped_at),
     startedAt: row.started_at,
     stoppedAt: row.stopped_at,
@@ -182,7 +186,7 @@ router.get('/sessions/:id/events', async (c) => {
   return c.json(events)
 })
 
-// PATCH /sessions/:id — update session table fields (slug, projectId)
+// PATCH /sessions/:id — update session table fields (slug, projectId, intent)
 router.patch('/sessions/:id', async (c) => {
   const store = c.get('store')
   const broadcastToAll = c.get('broadcastToAll')
@@ -208,6 +212,36 @@ router.patch('/sessions/:id', async (c) => {
       broadcastToAll({
         type: 'session_update',
         data: { id: sessionId, projectId: data.projectId },
+      })
+    }
+
+    // Intent: trim, cap at 200 chars to prevent runaway prompts being
+    // pasted in. Source defaults to 'manual' (the slash command path);
+    // hooks pass 'auto' explicitly. The store enforces the sticky-manual
+    // rule so we don't have to here.
+    if ('intent' in data) {
+      const raw = data.intent
+      const intent =
+        raw === null ? null : typeof raw === 'string' ? raw.trim().slice(0, 200) || null : null
+      const source: 'manual' | 'auto' = data.intentSource === 'auto' ? 'auto' : 'manual'
+      await store.updateSessionIntent(sessionId, intent, source)
+
+      if (LOG_LEVEL === 'debug') {
+        console.log(
+          `[METADATA] Session ${sessionId.slice(0, 8)} intent (${source}): ${intent ?? '(cleared)'}`,
+        )
+      }
+
+      // Re-fetch so we broadcast the post-write value (auto-source
+      // writes can be no-ops when a manual intent is already set).
+      const after = await store.getSessionById(sessionId)
+      broadcastToAll({
+        type: 'session_update',
+        data: {
+          id: sessionId,
+          intent: after?.intent ?? null,
+          intentSource: (after?.intent_source as 'manual' | 'auto' | null) ?? null,
+        } as any,
       })
     }
 

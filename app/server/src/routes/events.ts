@@ -22,6 +22,12 @@ import { validateEnvelope, EnvelopeValidationError } from '../parser'
 import { resolveProject } from '../services/project-resolver'
 import { config } from '../config'
 import { apiError } from '../errors'
+import { extractPromptSnippet } from '../utils/prompt-snippet'
+import { extractTouchedPaths } from '../utils/file-touch'
+
+// Re-export so existing callers (and tests) keep working without
+// reaching into the utils dir.
+export { extractPromptSnippet }
 
 type Env = {
   Variables: {
@@ -128,6 +134,60 @@ router.post('/events', async (c) => {
       _meta: eventStoreMeta,
     })
 
+    // ---- Step 5a: record file touches for overlap detection --------------
+    // When a Read/Edit/Write/NotebookEdit tool fires, stamp the touched
+    // file path(s) into recent_file_touches. The /api/overlaps endpoint
+    // reads from this table to surface "two sessions on the same file"
+    // banners. Unknown agent classes and non-tool events return [], so
+    // this is a no-op for everything else.
+    const touchedPaths = extractTouchedPaths(
+      envelope.agentClass,
+      envelope.hookName,
+      envelope.payload,
+    )
+    if (touchedPaths.length > 0) {
+      const toolName =
+        (envelope.payload as Record<string, unknown> | undefined)?.tool_name &&
+        typeof (envelope.payload as Record<string, unknown>).tool_name === 'string'
+          ? ((envelope.payload as Record<string, unknown>).tool_name as string)
+          : 'unknown'
+      for (const filePath of touchedPaths) {
+        await store.recordFileTouch({
+          sessionId: envelope.sessionId,
+          filePath,
+          toolName,
+          touchedAt: timestamp,
+        })
+      }
+      // Tell every connected client that overlaps may have changed.
+      // Payload-free signal: clients refetch /api/overlaps on receipt
+      // (same pattern as session_update). The refetch is a single
+      // indexed SQLite query, so the cost of an occasional false
+      // positive is negligible compared to the code needed to detect
+      // "did the visible pair set actually change" server-side.
+      broadcastToAll({ type: 'overlaps_update' })
+    }
+
+    // ---- Step 5b: auto-derive session intent on UserPromptSubmit ---------
+    // First user prompt of a session is a great cheap signal for "what
+    // is this session about". We extract a 60-char snippet and store it
+    // as the session's auto intent. Manual intents (set via /intent)
+    // are sticky — the store layer's updateSessionIntent enforces that
+    // a 'manual' source is never overwritten by an 'auto' write.
+    let autoIntentBroadcast: { intent: string | null } | null = null
+    if (envelope.hookName === 'UserPromptSubmit') {
+      const snippet = extractPromptSnippet(envelope.payload)
+      if (snippet) {
+        await store.updateSessionIntent(envelope.sessionId, snippet, 'auto')
+        // Re-fetch to discover whether the auto write actually landed
+        // (it's a no-op when a manual intent is already present).
+        const fresh = await store.getSessionById(envelope.sessionId)
+        if (fresh?.intent === snippet && fresh?.intent_source === 'auto') {
+          autoIntentBroadcast = { intent: snippet }
+        }
+      }
+    }
+
     // ---- Step 6: apply flags in spec order (clear → start → stop) --------
     const flags = envelope.flags ?? {}
     const wasPending = session?.pending_notification_ts ?? null
@@ -190,6 +250,18 @@ router.post('/events', async (c) => {
       broadcastToAll({
         type: 'session_update',
         data: { id: envelope.sessionId, status: 'stopped' },
+      })
+    }
+    if (autoIntentBroadcast) {
+      // Push the auto-derived intent to every connected client so the
+      // dashboard row re-titles instantly on the first prompt.
+      broadcastToAll({
+        type: 'session_update',
+        data: {
+          id: envelope.sessionId,
+          intent: autoIntentBroadcast.intent,
+          intentSource: 'auto',
+        } as any,
       })
     }
     if (pendingTransition === 'set') {

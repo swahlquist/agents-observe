@@ -26,6 +26,13 @@ export interface Session {
   projectName?: string | null
   transcriptPath?: string | null
   slug: string | null
+  // Human-readable session goal. Set explicitly via the /intent slash
+  // command, or auto-derived from the first user prompt. Rendered as
+  // the row title in the dashboard so users can scan a list of
+  // sessions and immediately know what each one is for. Null until a
+  // prompt arrives or /intent is run.
+  intent?: string | null
+  intentSource?: 'manual' | 'auto' | null
   // Status is a derived field. Server returns either `'active'` or
   // `'ended'`/`'stopped'`, computed from `stoppedAt`. The column is gone
   // from the schema; this string lives on the API response only.
@@ -97,6 +104,10 @@ export interface RecentSession {
   projectSlug: string | null
   projectName: string | null
   slug: string | null
+  // See Session.intent for full semantics — same field, mirrored here
+  // because /sessions/recent returns RecentSession not Session.
+  intent?: string | null
+  intentSource?: 'manual' | 'auto' | null
   transcriptPath?: string | null
   // Derived server-side from stoppedAt (see Session.status comment).
   status: string
@@ -153,5 +164,6 @@ export type WSMessage =
       type: 'activity'
       data: { sessionId: string; projectId: number | null; eventId: number; ts: number }
     }
+  | { type: 'overlaps_update' }
 
 export type WSClientMessage = { type: 'subscribe'; sessionId: string } | { type: 'unsubscribe' }

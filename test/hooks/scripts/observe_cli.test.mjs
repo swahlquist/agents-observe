@@ -310,16 +310,22 @@ describe('observe_cli', () => {
     })
 
     it('skips auto-start when custom API URL is set and unreachable', async () => {
+      // Use 127.0.0.255 instead of a hostname like "remote-server" —
+      // a hostname forces a DNS lookup that can hang for 5+ seconds
+      // on systems with slow / misconfigured DNS (notably WSL2),
+      // busting the 5s test timeout. 127.0.0.255 is a valid loopback
+      // address that nothing's bound to, so the connection fails
+      // instantly with ECONNREFUSED — no DNS involved.
       const { stdout } = await runCli(['hook-autostart'], {
         stdin: JSON.stringify({ hook_event_name: 'SessionStart' }),
         env: {
-          AGENTS_OBSERVE_API_BASE_URL: 'http://remote-server:9999/api',
+          AGENTS_OBSERVE_API_BASE_URL: 'http://127.0.0.255:9999/api',
           AGENTS_OBSERVE_HOOK_STARTUP_TIMEOUT: '1000',
         },
       })
       const parsed = JSON.parse(stdout)
       expect(parsed.systemMessage).toContain('unreachable')
-      expect(parsed.systemMessage).toContain('remote-server:9999')
+      expect(parsed.systemMessage).toContain('127.0.0.255:9999')
     })
 
     it('always returns valid JSON even on error', async () => {

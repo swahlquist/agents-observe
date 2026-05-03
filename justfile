@@ -104,7 +104,8 @@ fmt:
 release version:
     {{ project_root }}/scripts/release.sh {{ version }}
 
-# Install all dependencies
+# Install all dependencies (root + server + client)
 install:
+    cd {{ project_root }} && npm install
     cd {{ server }} && npm install
     cd {{ client }} && npm install

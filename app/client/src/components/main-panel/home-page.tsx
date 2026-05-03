@@ -3,6 +3,7 @@ import { Clock, CalendarDays } from 'lucide-react'
 import { useRecentSessions } from '@/hooks/use-recent-sessions'
 import { useUIStore } from '@/stores/ui-store'
 import { SessionList } from './session-list'
+import { OverlapBanner } from './overlap-banner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 export function HomePage() {
@@ -17,6 +18,7 @@ export function HomePage() {
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
+      <OverlapBanner />
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
         <div>
           <h1 className="text-sm font-semibold">Recent Sessions</h1>

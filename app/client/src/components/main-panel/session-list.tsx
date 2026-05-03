@@ -6,6 +6,7 @@ import {
   dismissNotification,
   useSessionHasNotification,
 } from '@/components/sidebar/notification-indicator'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { Session, RecentSession } from '@/types'
 
 function formatRelativeTime(ts: number): string {
@@ -86,7 +87,15 @@ function SessionRow({
   sortBy: 'activity' | 'created'
   onSelect: () => void
 }) {
-  const label = session.slug || session.id.slice(0, 8)
+  // Title precedence: explicit intent (from /intent or auto-derive) →
+  // human slug → first 8 chars of session id. The slug stays as the
+  // hover tooltip so anyone debugging by slug name can still find it.
+  const slug = session.slug
+  const intent = session.intent ?? null
+  const intentSource = session.intentSource ?? null
+  const fallback = slug || session.id.slice(0, 8)
+  const title = intent || fallback
+  const showSlugSubline = !!intent && !!slug && slug !== intent
   const cwd = typeof session.metadata?.cwd === 'string' ? session.metadata.cwd : null
   const lastTime =
     sortBy === 'activity'
@@ -94,6 +103,19 @@ function SessionRow({
       : session.startedAt
   const projectName = 'projectName' in session ? session.projectName : null
   const needsAttention = useSessionHasNotification(session.id)
+
+  const titleEl = (
+    <span
+      className={cn(
+        'text-sm font-medium truncate',
+        // Auto-derived intents are shown a touch lighter so users can
+        // see at a glance which sessions still want a real /intent set.
+        intentSource === 'auto' && 'text-foreground/85 italic',
+      )}
+    >
+      {title}
+    </span>
+  )
 
   return (
     <button
@@ -126,7 +148,19 @@ function SessionRow({
             )}
           />
         )}
-        <span className="text-sm font-medium truncate">{label}</span>
+        {intent ? (
+          <Tooltip>
+            <TooltipTrigger asChild>{titleEl}</TooltipTrigger>
+            <TooltipContent side="top" className="text-xs">
+              {intentSource === 'auto'
+                ? 'Auto-derived from first prompt — set with /intent'
+                : 'Set via /intent'}
+              {slug && <div className="mt-1 opacity-70">slug: {slug}</div>}
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          titleEl
+        )}
         <div className="flex items-center gap-1.5 ml-auto shrink-0">
           {/* event count badge removed — counts are no longer
               denormalized on the session row. Re-add via
@@ -138,6 +172,11 @@ function SessionRow({
           <span className="flex items-center gap-1 min-w-0">
             <Folder className="h-3 w-3 shrink-0" />
             <span className="truncate">{projectName}</span>
+          </span>
+        )}
+        {showSlugSubline && (
+          <span className="truncate text-muted-foreground/70 dark:text-muted-foreground/50">
+            {slug}
           </span>
         )}
         {cwd && (

@@ -95,6 +95,18 @@ export interface EventStore {
   updateSessionStatus(id: string, status: string): Promise<void>
   patchSessionMetadata(sessionId: string, patch: Record<string, unknown>): Promise<void>
   updateSessionSlug(sessionId: string, slug: string): Promise<void>
+  /**
+   * Set the human-readable session intent. `source: 'manual'` (from the
+   * /intent slash command) is sticky and overrides any prior value.
+   * `source: 'auto'` (e.g. derived from the first user prompt) only
+   * writes when the existing intent is NULL or also auto-derived, so
+   * manually-set intents never get clobbered.
+   */
+  updateSessionIntent(
+    sessionId: string,
+    intent: string | null,
+    source: 'manual' | 'auto',
+  ): Promise<void>
   updateSessionProject(sessionId: string, projectId: number): Promise<void>
   updateAgentName(agentId: string, name: string): Promise<void>
   /** Set `pending_notification_ts = timestamp` and bump count + last. */
@@ -105,6 +117,28 @@ export interface EventStore {
   stopSession(sessionId: string, timestamp: number): Promise<void>
   /** Update `sessions.last_activity` to MAX(current, timestamp). */
   touchSessionActivity(sessionId: string, timestamp: number): Promise<void>
+  /**
+   * Record that a session touched a file via a tool call. UPSERT on
+   * (session_id, file_path) so the table stays one-row-per-pair and
+   * needs no background pruning. `touched_at` only moves forward (we
+   * never overwrite a newer touch with an older one).
+   */
+  recordFileTouch(params: {
+    sessionId: string
+    filePath: string
+    toolName: string
+    touchedAt: number
+  }): Promise<void>
+  /**
+   * Find pairs of currently-active sessions (stopped_at IS NULL) that
+   * have touched the same file path within the given lookback window.
+   * `sinceTimestamp` is the lower bound (ms-epoch); rows older than
+   * that are excluded on both sides. Pairs are deduplicated using
+   * `session_a < session_b` so each unordered pair appears once.
+   * Returns one row per (sessionA, sessionB, filePath); the route
+   * layer is free to group by pair when composing the response.
+   */
+  findOverlappingSessions(sinceTimestamp: number): Promise<OverlapRow[]>
   insertEvent(params: InsertEventParams): Promise<InsertEventResult>
   getProjects(): Promise<any[]>
   getSessionsForProject(projectId: number): Promise<any[]>
@@ -139,6 +173,16 @@ export interface EventStore {
    * Returns a summary of what was repaired.
    */
   repairOrphans(): Promise<OrphanRepairResult>
+}
+
+export interface OverlapRow {
+  sessionA: string
+  sessionB: string
+  filePath: string
+  aTouchedAt: number
+  bTouchedAt: number
+  aToolName: string
+  bToolName: string
 }
 
 export interface OrphanRepairResult {

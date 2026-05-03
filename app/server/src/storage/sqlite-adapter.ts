@@ -10,7 +10,9 @@ import type {
   EventFilters,
   StoredEvent,
   OrphanRepairResult,
+  OverlapRow,
 } from './types'
+import { extractPromptSnippet } from '../utils/prompt-snippet'
 
 export class SqliteAdapter implements EventStore {
   private db: Database.Database
@@ -213,6 +215,29 @@ export class SqliteAdapter implements EventStore {
       )
     }
 
+    // Migration: add `intent` — a short human-readable summary of what
+    // the session is doing right now. Settable via the /intent slash
+    // command and auto-derived from the first user prompt as a fallback.
+    // Rendered as the row title in the dashboard, replacing the random
+    // slug ("twinkly-hugging-dragon") so users can scan a list of
+    // sessions and immediately know what each one is for.
+    const intentColAdded = !sessionColsAfter.some((c) => c.name === 'intent')
+    if (intentColAdded) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN intent TEXT')
+    }
+    // Track whether the current intent was auto-derived (e.g. from the
+    // first user prompt) vs explicitly set via /intent. Auto-derived
+    // intents get overwritten by either a manual /intent or a better
+    // auto-derivation; manual intents are sticky.
+    const intentSourceColAdded = !sessionColsAfter.some((c) => c.name === 'intent_source')
+    if (intentSourceColAdded) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN intent_source TEXT')
+    }
+    // Backfill of auto intents from the first UserPromptSubmit happens
+    // at the end of the constructor (see the call after index creation).
+    // It depends on the `events` table, which is created further down,
+    // so running it inline here would fail on a fresh database.
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY,
@@ -364,8 +389,28 @@ export class SqliteAdapter implements EventStore {
       `)
     }
 
+    // recent_file_touches: one row per (session, file_path), updated
+    // in place via UPSERT each time a tool event for that file fires.
+    // Powers the overlap-detection banner ("two sessions touching the
+    // same file"). Composite primary key keeps the table naturally
+    // bounded by active_sessions x distinct_files_touched, so no
+    // background pruning is needed.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS recent_file_touches (
+        session_id TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        touched_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, file_path),
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      )
+    `)
+
     // Create indexes
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_projects_slug ON projects(slug)')
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_file_touches_path_ts ON recent_file_touches(file_path, touched_at)',
+    )
     this.db.exec('DROP INDEX IF EXISTS idx_projects_transcript_path')
     this.db.exec('DROP INDEX IF EXISTS idx_projects_cwd')
     this.db.exec('DROP INDEX IF EXISTS idx_events_type')
@@ -387,6 +432,17 @@ export class SqliteAdapter implements EventStore {
     this.db.exec(
       'CREATE INDEX IF NOT EXISTS idx_sessions_transcript_path ON sessions(transcript_path)',
     )
+
+    // One-time backfill: when the intent column is freshly added,
+    // walk every session and stamp an auto intent derived from its
+    // first UserPromptSubmit event. Without this, every session that
+    // existed before the upgrade would forever show its random slug
+    // as the row title. Manual /intent calls after this still win
+    // because intent_source = 'auto' here. Runs last so the events
+    // table and its indexes already exist.
+    if (intentColAdded || intentSourceColAdded) {
+      this.backfillIntentsFromFirstPrompt()
+    }
   }
 
   async createProject(slug: string, name: string): Promise<number> {
@@ -641,6 +697,59 @@ export class SqliteAdapter implements EventStore {
       .run(timestamp, Date.now(), sessionId)
   }
 
+  async recordFileTouch(params: {
+    sessionId: string
+    filePath: string
+    toolName: string
+    touchedAt: number
+  }): Promise<void> {
+    // UPSERT keeps one row per (session, file_path). touched_at only
+    // moves forward so out-of-order arrivals (rare but possible) cannot
+    // backdate a session's last touch.
+    this.db
+      .prepare(
+        `INSERT INTO recent_file_touches (session_id, file_path, tool_name, touched_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id, file_path) DO UPDATE SET
+           touched_at = MAX(recent_file_touches.touched_at, excluded.touched_at),
+           tool_name = CASE
+             WHEN excluded.touched_at >= recent_file_touches.touched_at
+               THEN excluded.tool_name
+             ELSE recent_file_touches.tool_name
+           END`,
+      )
+      .run(params.sessionId, params.filePath, params.toolName, params.touchedAt)
+  }
+
+  async findOverlappingSessions(sinceTimestamp: number): Promise<OverlapRow[]> {
+    // Self-join on file_path with `session_a < session_b` to dedupe
+    // unordered pairs. Inner-join sessions twice to require both ends
+    // are still active (stopped_at IS NULL). MAX(a, b) here is the
+    // scalar form (two args), used purely for ordering.
+    const rows = this.db
+      .prepare(
+        `SELECT
+           ft1.session_id AS sessionA,
+           ft2.session_id AS sessionB,
+           ft1.file_path  AS filePath,
+           ft1.touched_at AS aTouchedAt,
+           ft2.touched_at AS bTouchedAt,
+           ft1.tool_name  AS aToolName,
+           ft2.tool_name  AS bToolName
+         FROM recent_file_touches ft1
+         JOIN recent_file_touches ft2
+           ON ft1.file_path = ft2.file_path
+          AND ft1.session_id < ft2.session_id
+         JOIN sessions sa ON sa.id = ft1.session_id AND sa.stopped_at IS NULL
+         JOIN sessions sb ON sb.id = ft2.session_id AND sb.stopped_at IS NULL
+         WHERE ft1.touched_at > ?
+           AND ft2.touched_at > ?
+         ORDER BY MAX(ft1.touched_at, ft2.touched_at) DESC`,
+      )
+      .all(sinceTimestamp, sinceTimestamp) as OverlapRow[]
+    return rows
+  }
+
   async updateSessionStatus(id: string, status: string): Promise<void> {
     // The sessions table no longer stores `status` — it's derived from
     // `stopped_at`. This method now only updates `stopped_at` based on
@@ -673,6 +782,86 @@ export class SqliteAdapter implements EventStore {
     `,
       )
       .run(slug, sessionId)
+  }
+
+  /**
+   * Walk every session whose `intent` is NULL, find its first
+   * `UserPromptSubmit` event, extract a snippet from the payload, and
+   * write it as an auto intent. Synchronous (called from the
+   * constructor migration block) so we can guarantee it runs before
+   * the server starts answering requests.
+   *
+   * Returns the count of sessions updated. Safe to call multiple
+   * times — sessions that already have an intent are skipped.
+   */
+  backfillIntentsFromFirstPrompt(): number {
+    const rows = this.db
+      .prepare(
+        `SELECT s.id AS session_id, e.payload
+           FROM sessions s
+           JOIN events e ON e.session_id = s.id
+          WHERE s.intent IS NULL
+            AND e.hook_name = 'UserPromptSubmit'
+            AND e.id = (
+              SELECT MIN(e2.id) FROM events e2
+               WHERE e2.session_id = s.id
+                 AND e2.hook_name = 'UserPromptSubmit'
+            )`,
+      )
+      .all() as { session_id: string; payload: string }[]
+
+    if (rows.length === 0) return 0
+
+    const update = this.db.prepare(
+      `UPDATE sessions
+          SET intent = ?, intent_source = 'auto', updated_at = ?
+        WHERE id = ?
+          AND intent IS NULL`,
+    )
+    const tx = this.db.transaction(() => {
+      let updated = 0
+      const now = Date.now()
+      for (const row of rows) {
+        let payload: unknown
+        try {
+          payload = JSON.parse(row.payload)
+        } catch {
+          continue
+        }
+        const snippet = extractPromptSnippet(payload)
+        if (!snippet) continue
+        const result = update.run(snippet, now, row.session_id)
+        updated += result.changes
+      }
+      return updated
+    })
+    return tx()
+  }
+
+  async updateSessionIntent(
+    sessionId: string,
+    intent: string | null,
+    source: 'manual' | 'auto',
+  ): Promise<void> {
+    // Manual intents are sticky — once a user sets /intent, the auto
+    // fallback never overwrites it. Auto-derivations can overwrite
+    // earlier auto-derivations but never a manual one.
+    if (source === 'auto') {
+      this.db
+        .prepare(
+          `UPDATE sessions
+             SET intent = ?, intent_source = 'auto', updated_at = ?
+           WHERE id = ?
+             AND (intent_source IS NULL OR intent_source = 'auto')`,
+        )
+        .run(intent, Date.now(), sessionId)
+      return
+    }
+    this.db
+      .prepare(
+        `UPDATE sessions SET intent = ?, intent_source = 'manual', updated_at = ? WHERE id = ?`,
+      )
+      .run(intent, Date.now(), sessionId)
   }
 
   async updateAgentName(agentId: string, name: string): Promise<void> {

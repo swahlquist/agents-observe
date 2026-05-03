@@ -11,6 +11,7 @@ import { createLogger } from './lib/logger.mjs'
 import { startServer, stopServer } from './lib/docker.mjs'
 import { removeDatabase } from './lib/fs.mjs'
 import { hookCommand, hookSyncCommand, hookAutostartCommand } from './lib/hooks.mjs'
+import { intentCommand } from './lib/intent.mjs'
 
 const cliArgs = parseArgs(process.argv.slice(2))
 const config = getConfig(cliArgs)
@@ -29,6 +30,8 @@ switch (cliArgs.commands[0] || 'help') {
     console.log('  restart:         Restart the server')
     console.log('  db-reset:        Delete the SQLite database [--force to skip confirmation]')
     console.log('  logs [args]:     Show Docker container logs (e.g. logs -f, logs -n 100)')
+    console.log('  intent "<text>": Set the current session\'s intent — what it\'s working on.')
+    console.log('                   Flags: --session-id <id>, --cwd <path>, --source manual|auto')
     process.exit(0)
   case 'hook':
     hookCommand(config, log)
@@ -56,6 +59,16 @@ switch (cliArgs.commands[0] || 'help') {
     break
   case 'logs':
     logsCommand()
+    break
+  case 'intent':
+    intentCommand(config, log, {
+      // Everything after "intent" is the intent text. Joined so users
+      // don't have to quote single-word intents (`/intent refactor`).
+      intentText: cliArgs.commands.slice(1).join(' '),
+      sessionId: cliArgs.sessionId,
+      cwd: cliArgs.cwd,
+      source: cliArgs.source,
+    })
     break
   default:
     console.error(`Unknown command: ${cliArgs.commands[0]}`)
@@ -203,8 +216,18 @@ function confirm(prompt) {
 function parseArgs(args) {
   // Commands like 'logs' pass remaining args through to docker, so once we
   // encounter one of these we stop parsing and capture everything that follows.
+  // 'intent' uses positional capture too — everything after the flags is
+  // joined into the intent text.
   const passthroughCommands = new Set(['logs'])
-  const parsed = { commands: [], baseUrl: null, projectSlug: null, force: false }
+  const parsed = {
+    commands: [],
+    baseUrl: null,
+    projectSlug: null,
+    force: false,
+    sessionId: null,
+    cwd: null,
+    source: null,
+  }
   for (let i = 0; i < args.length; i++) {
     if (parsed.commands.length && passthroughCommands.has(parsed.commands[0])) {
       parsed.commands.push(args[i])
@@ -213,6 +236,15 @@ function parseArgs(args) {
       i++
     } else if (args[i] === '--project-slug' && args[i + 1]) {
       parsed.projectSlug = args[i + 1]
+      i++
+    } else if (args[i] === '--session-id' && args[i + 1]) {
+      parsed.sessionId = args[i + 1]
+      i++
+    } else if (args[i] === '--cwd' && args[i + 1]) {
+      parsed.cwd = args[i + 1]
+      i++
+    } else if (args[i] === '--source' && args[i + 1]) {
+      parsed.source = args[i + 1]
       i++
     } else if (args[i] === '--force') {
       parsed.force = true

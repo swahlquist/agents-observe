@@ -1440,3 +1440,514 @@ describe('SqliteAdapter — repairOrphans', () => {
     expect(found.project_id).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Session intent — sticky-manual semantics
+// ---------------------------------------------------------------------------
+describe('SqliteAdapter — updateSessionIntent', () => {
+  test('intent column starts NULL on a fresh session', async () => {
+    const { sessionId } = await seedBasic()
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBeNull()
+    expect(session.intent_source).toBeNull()
+  })
+
+  test('manual intent stamps intent_source = manual', async () => {
+    const { sessionId } = await seedBasic()
+    await store.updateSessionIntent(sessionId, 'Refactor symbol search', 'manual')
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBe('Refactor symbol search')
+    expect(session.intent_source).toBe('manual')
+  })
+
+  test('auto intent stamps intent_source = auto when no prior intent', async () => {
+    const { sessionId } = await seedBasic()
+    await store.updateSessionIntent(sessionId, 'snippet from prompt', 'auto')
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBe('snippet from prompt')
+    expect(session.intent_source).toBe('auto')
+  })
+
+  test('auto intent does NOT overwrite an existing manual intent', async () => {
+    const { sessionId } = await seedBasic()
+    await store.updateSessionIntent(sessionId, 'human intent', 'manual')
+    await store.updateSessionIntent(sessionId, 'auto from prompt', 'auto')
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBe('human intent')
+    expect(session.intent_source).toBe('manual')
+  })
+
+  test('manual intent overwrites an existing auto intent', async () => {
+    const { sessionId } = await seedBasic()
+    await store.updateSessionIntent(sessionId, 'auto', 'auto')
+    await store.updateSessionIntent(sessionId, 'manual override', 'manual')
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBe('manual override')
+    expect(session.intent_source).toBe('manual')
+  })
+
+  test('auto can refresh another auto value (e.g. updated prompt summary)', async () => {
+    const { sessionId } = await seedBasic()
+    await store.updateSessionIntent(sessionId, 'first auto', 'auto')
+    await store.updateSessionIntent(sessionId, 'second auto', 'auto')
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBe('second auto')
+    expect(session.intent_source).toBe('auto')
+  })
+
+  test('manual NULL clears the intent', async () => {
+    const { sessionId } = await seedBasic()
+    await store.updateSessionIntent(sessionId, 'something', 'manual')
+    await store.updateSessionIntent(sessionId, null, 'manual')
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBeNull()
+    expect(session.intent_source).toBe('manual')
+  })
+
+  test('intent flows through getRecentSessions', async () => {
+    const { sessionId } = await seedBasic()
+    await store.updateSessionIntent(sessionId, 'visible on home', 'manual')
+    const rows = await store.getRecentSessions()
+    const row = rows.find((r: { id: string }) => r.id === sessionId)
+    expect(row.intent).toBe('visible on home')
+    expect(row.intent_source).toBe('manual')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Backfill — populate intent for sessions that predate the migration
+// ---------------------------------------------------------------------------
+describe('SqliteAdapter — backfillIntentsFromFirstPrompt', () => {
+  test('returns 0 on an empty database', () => {
+    expect(store.backfillIntentsFromFirstPrompt()).toBe(0)
+  })
+
+  test('stamps an auto intent on sessions with a UserPromptSubmit event', async () => {
+    const { sessionId, rootAgentId } = await seedBasic()
+    await insertHookEvent({
+      agentId: rootAgentId,
+      sessionId,
+      hookName: 'UserPromptSubmit',
+      timestamp: 100,
+      payload: { prompt: 'Refactor the symbol search component' },
+    })
+
+    const updated = store.backfillIntentsFromFirstPrompt()
+    expect(updated).toBe(1)
+
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBe('Refactor the symbol search component')
+    expect(session.intent_source).toBe('auto')
+  })
+
+  test('uses the FIRST UserPromptSubmit, not the most recent', async () => {
+    const { sessionId, rootAgentId } = await seedBasic()
+    await insertHookEvent({
+      agentId: rootAgentId,
+      sessionId,
+      hookName: 'UserPromptSubmit',
+      timestamp: 100,
+      payload: { prompt: 'first prompt — should win' },
+    })
+    await insertHookEvent({
+      agentId: rootAgentId,
+      sessionId,
+      hookName: 'UserPromptSubmit',
+      timestamp: 200,
+      payload: { prompt: 'second prompt — should lose' },
+    })
+
+    store.backfillIntentsFromFirstPrompt()
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBe('first prompt — should win')
+  })
+
+  test('skips sessions with no UserPromptSubmit events', async () => {
+    const { sessionId, rootAgentId } = await seedBasic()
+    await insertHookEvent({
+      agentId: rootAgentId,
+      sessionId,
+      hookName: 'PreToolUse',
+      timestamp: 100,
+    })
+
+    expect(store.backfillIntentsFromFirstPrompt()).toBe(0)
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBeNull()
+  })
+
+  test('skips sessions that already have an intent (idempotent)', async () => {
+    const { sessionId, rootAgentId } = await seedBasic()
+    await insertHookEvent({
+      agentId: rootAgentId,
+      sessionId,
+      hookName: 'UserPromptSubmit',
+      timestamp: 100,
+      payload: { prompt: 'this should not overwrite anything' },
+    })
+    await store.updateSessionIntent(sessionId, 'human-set winner', 'manual')
+
+    const updated = store.backfillIntentsFromFirstPrompt()
+    expect(updated).toBe(0)
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBe('human-set winner')
+    expect(session.intent_source).toBe('manual')
+  })
+
+  test('handles malformed JSON payloads without crashing', async () => {
+    const { sessionId, rootAgentId } = await seedBasic()
+    await insertHookEvent({
+      agentId: rootAgentId,
+      sessionId,
+      hookName: 'UserPromptSubmit',
+      timestamp: 100,
+    })
+    // Hand-corrupt the payload to simulate a bad row.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(store as any).db
+      .prepare("UPDATE events SET payload = 'not-json' WHERE session_id = ?")
+      .run(sessionId)
+
+    expect(() => store.backfillIntentsFromFirstPrompt()).not.toThrow()
+    const session = await store.getSessionById(sessionId)
+    expect(session.intent).toBeNull()
+  })
+
+  test('processes multiple sessions in one pass', async () => {
+    const projectId = await store.createProject('p1', 'P')
+
+    for (let i = 1; i <= 3; i++) {
+      const sid = `multi-${i}`
+      await store.upsertSession(sid, projectId, null, null, i * 1000)
+      await store.upsertAgent(sid, sid, null, null, null)
+      await insertHookEvent({
+        agentId: sid,
+        sessionId: sid,
+        hookName: 'UserPromptSubmit',
+        timestamp: i * 1000,
+        payload: { prompt: `prompt ${i}` },
+      })
+    }
+
+    expect(store.backfillIntentsFromFirstPrompt()).toBe(3)
+    for (let i = 1; i <= 3; i++) {
+      const s = await store.getSessionById(`multi-${i}`)
+      expect(s.intent).toBe(`prompt ${i}`)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// File-touch tracking + overlap detection
+// ---------------------------------------------------------------------------
+describe('SqliteAdapter - recordFileTouch', () => {
+  test('inserts a new touch row', async () => {
+    const projectId = await store.createProject('p', 'P')
+    await store.upsertSession('s1', projectId, null, null, 1000)
+    await store.recordFileTouch({
+      sessionId: 's1',
+      filePath: '/repo/foo.ts',
+      toolName: 'Edit',
+      touchedAt: 5000,
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (store as any).db
+      .prepare('SELECT * FROM recent_file_touches WHERE session_id = ?')
+      .all('s1')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      session_id: 's1',
+      file_path: '/repo/foo.ts',
+      tool_name: 'Edit',
+      touched_at: 5000,
+    })
+  })
+
+  test('UPSERT keeps a single row per (session, file_path) and advances touched_at', async () => {
+    const projectId = await store.createProject('p', 'P')
+    await store.upsertSession('s1', projectId, null, null, 1000)
+    await store.recordFileTouch({
+      sessionId: 's1',
+      filePath: '/repo/foo.ts',
+      toolName: 'Read',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 's1',
+      filePath: '/repo/foo.ts',
+      toolName: 'Edit',
+      touchedAt: 6000,
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (store as any).db
+      .prepare('SELECT * FROM recent_file_touches WHERE session_id = ?')
+      .all('s1')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].touched_at).toBe(6000)
+    expect(rows[0].tool_name).toBe('Edit')
+  })
+
+  test('out-of-order touch does not backdate touched_at or overwrite tool_name', async () => {
+    const projectId = await store.createProject('p', 'P')
+    await store.upsertSession('s1', projectId, null, null, 1000)
+    await store.recordFileTouch({
+      sessionId: 's1',
+      filePath: '/repo/foo.ts',
+      toolName: 'Edit',
+      touchedAt: 6000,
+    })
+    await store.recordFileTouch({
+      sessionId: 's1',
+      filePath: '/repo/foo.ts',
+      toolName: 'Read',
+      touchedAt: 5000,
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (store as any).db
+      .prepare('SELECT * FROM recent_file_touches WHERE session_id = ?')
+      .all('s1')
+    expect(rows[0].touched_at).toBe(6000)
+    expect(rows[0].tool_name).toBe('Edit')
+  })
+
+  test('different file_paths produce separate rows', async () => {
+    const projectId = await store.createProject('p', 'P')
+    await store.upsertSession('s1', projectId, null, null, 1000)
+    await store.recordFileTouch({
+      sessionId: 's1',
+      filePath: '/a.ts',
+      toolName: 'Read',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 's1',
+      filePath: '/b.ts',
+      toolName: 'Read',
+      touchedAt: 5000,
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const count = (store as any).db
+      .prepare('SELECT COUNT(*) as c FROM recent_file_touches WHERE session_id = ?')
+      .get('s1') as { c: number }
+    expect(count.c).toBe(2)
+  })
+
+  test('deleting a session cascades to its file touches', async () => {
+    const projectId = await store.createProject('p', 'P')
+    await store.upsertSession('s1', projectId, null, null, 1000)
+    await store.recordFileTouch({
+      sessionId: 's1',
+      filePath: '/repo/foo.ts',
+      toolName: 'Read',
+      touchedAt: 5000,
+    })
+    await store.deleteSession('s1')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const count = (store as any).db
+      .prepare('SELECT COUNT(*) as c FROM recent_file_touches')
+      .get() as { c: number }
+    expect(count.c).toBe(0)
+  })
+})
+
+describe('SqliteAdapter - findOverlappingSessions', () => {
+  async function seedOverlap() {
+    const projectId = await store.createProject('p', 'P')
+    await store.upsertSession('sA', projectId, null, null, 1000)
+    await store.upsertSession('sB', projectId, null, null, 1000)
+    await store.upsertSession('sC', projectId, null, null, 1000)
+    return { projectId }
+  }
+
+  test('returns empty when no rows exist', async () => {
+    const rows = await store.findOverlappingSessions(0)
+    expect(rows).toEqual([])
+  })
+
+  test('returns one row per active-session pair sharing a file_path', async () => {
+    await seedOverlap()
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/shared.ts',
+      toolName: 'Edit',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/shared.ts',
+      toolName: 'Read',
+      touchedAt: 5500,
+    })
+    const rows = await store.findOverlappingSessions(0)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      sessionA: 'sA',
+      sessionB: 'sB',
+      filePath: '/shared.ts',
+      aToolName: 'Edit',
+      bToolName: 'Read',
+    })
+  })
+
+  test('deduplicates unordered pairs (only one row per pair, not two)', async () => {
+    await seedOverlap()
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/shared.ts',
+      toolName: 'Read',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/shared.ts',
+      toolName: 'Edit',
+      touchedAt: 5500,
+    })
+    const rows = await store.findOverlappingSessions(0)
+    expect(rows).toHaveLength(1)
+    // session_a < session_b ordering
+    expect(rows[0].sessionA < rows[0].sessionB).toBe(true)
+  })
+
+  test('excludes pairs where the file is unique to one session', async () => {
+    await seedOverlap()
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/only-A.ts',
+      toolName: 'Edit',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/only-B.ts',
+      toolName: 'Edit',
+      touchedAt: 5000,
+    })
+    const rows = await store.findOverlappingSessions(0)
+    expect(rows).toEqual([])
+  })
+
+  test('excludes touches older than the sinceTimestamp cutoff', async () => {
+    await seedOverlap()
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/shared.ts',
+      toolName: 'Edit',
+      touchedAt: 1000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/shared.ts',
+      toolName: 'Read',
+      touchedAt: 1500,
+    })
+    expect(await store.findOverlappingSessions(2000)).toEqual([])
+    const recent = await store.findOverlappingSessions(900)
+    expect(recent).toHaveLength(1)
+  })
+
+  test('excludes pairs where either session is stopped', async () => {
+    await seedOverlap()
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/shared.ts',
+      toolName: 'Edit',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/shared.ts',
+      toolName: 'Read',
+      touchedAt: 5500,
+    })
+    await store.stopSession('sB', 6000)
+    expect(await store.findOverlappingSessions(0)).toEqual([])
+  })
+
+  test('returns multiple rows when sessions overlap on multiple files', async () => {
+    await seedOverlap()
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/foo.ts',
+      toolName: 'Edit',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/foo.ts',
+      toolName: 'Read',
+      touchedAt: 5500,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/bar.ts',
+      toolName: 'Read',
+      touchedAt: 5100,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/bar.ts',
+      toolName: 'Edit',
+      touchedAt: 5600,
+    })
+    const rows = await store.findOverlappingSessions(0)
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.filePath).sort()).toEqual(['/bar.ts', '/foo.ts'])
+  })
+
+  test('orders rows by most recent overlap activity first', async () => {
+    await seedOverlap()
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/old.ts',
+      toolName: 'Edit',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/old.ts',
+      toolName: 'Read',
+      touchedAt: 5100,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/new.ts',
+      toolName: 'Edit',
+      touchedAt: 9000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/new.ts',
+      toolName: 'Read',
+      touchedAt: 9100,
+    })
+    const rows = await store.findOverlappingSessions(0)
+    expect(rows.map((r) => r.filePath)).toEqual(['/new.ts', '/old.ts'])
+  })
+
+  test('handles three sessions on the same file as three pairs', async () => {
+    await seedOverlap()
+    await store.recordFileTouch({
+      sessionId: 'sA',
+      filePath: '/x.ts',
+      toolName: 'Edit',
+      touchedAt: 5000,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sB',
+      filePath: '/x.ts',
+      toolName: 'Read',
+      touchedAt: 5100,
+    })
+    await store.recordFileTouch({
+      sessionId: 'sC',
+      filePath: '/x.ts',
+      toolName: 'Read',
+      touchedAt: 5200,
+    })
+    const rows = await store.findOverlappingSessions(0)
+    expect(rows).toHaveLength(3)
+    const pairs = rows.map((r) => `${r.sessionA}-${r.sessionB}`).sort()
+    expect(pairs).toEqual(['sA-sB', 'sA-sC', 'sB-sC'])
+  })
+})

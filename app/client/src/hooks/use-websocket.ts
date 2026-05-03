@@ -180,6 +180,12 @@ export function useWebSocket(sessionId: string | null) {
       } else if (msg.type === 'notification_clear') {
         const { sessionId, ts } = msg.data
         clearNotification(sessionId, ts)
+      } else if (msg.type === 'overlaps_update') {
+        // Payload-free signal that a tool event recorded a file touch.
+        // Refetch to pick up any new / shrunken pairs. Cheap server-side
+        // (single indexed query + tiny JSON), so even bursty touches
+        // don't cause meaningful traffic.
+        queryClient.invalidateQueries({ queryKey: ['overlaps'] })
       } else if (msg.type === 'activity') {
         const { sessionId, projectId } = msg.data
         useUIStore.getState().pulseSession(sessionId, projectId)

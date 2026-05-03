@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach } from 'vitest'
 import { Hono } from 'hono'
 import { SqliteAdapter } from '../storage/sqlite-adapter'
 import type { EventStore } from '../storage/types'
+import { extractPromptSnippet } from './events'
 
 type Env = {
   Variables: {
@@ -339,5 +340,257 @@ describe('POST /api/events — callbacks (`requests` array)', () => {
     })
     const body2 = (await r2.json()) as { requests?: unknown[] }
     expect(body2.requests).toBeUndefined()
+  })
+})
+
+describe('extractPromptSnippet — auto-intent helper', () => {
+  test('returns the prompt field as-is when short', () => {
+    expect(extractPromptSnippet({ prompt: 'Refactor symbol search' })).toBe(
+      'Refactor symbol search',
+    )
+  })
+
+  test('collapses whitespace and trims', () => {
+    expect(extractPromptSnippet({ prompt: '  hello\n\nworld\t!  ' })).toBe('hello world !')
+  })
+
+  test('truncates with ellipsis past 60 chars', () => {
+    const long =
+      'This is a very very long prompt that definitely exceeds the sixty character cap for sure'
+    const out = extractPromptSnippet({ prompt: long })
+    expect(out).not.toBeNull()
+    expect(out!.length).toBeLessThanOrEqual(60)
+    expect(out!.endsWith('...')).toBe(true)
+  })
+
+  test('falls back through prompt → user_prompt → text → message → content', () => {
+    expect(extractPromptSnippet({ user_prompt: 'a' })).toBe('a')
+    expect(extractPromptSnippet({ text: 'b' })).toBe('b')
+    expect(extractPromptSnippet({ message: 'c' })).toBe('c')
+    expect(extractPromptSnippet({ content: 'd' })).toBe('d')
+  })
+
+  test('returns null on empty payload, empty string, or non-object', () => {
+    expect(extractPromptSnippet(null)).toBeNull()
+    expect(extractPromptSnippet({})).toBeNull()
+    expect(extractPromptSnippet({ prompt: '' })).toBeNull()
+    expect(extractPromptSnippet({ prompt: '   ' })).toBeNull()
+    expect(extractPromptSnippet('a string, not an object')).toBeNull()
+  })
+})
+
+describe('POST /api/events — UserPromptSubmit auto-intent', () => {
+  test('writes auto intent on first UserPromptSubmit and broadcasts session_update', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-intent',
+      agentId: 'sess-intent',
+      hookName: 'UserPromptSubmit',
+      timestamp: 1000,
+      payload: { prompt: 'Refactor symbol search to embeddings' },
+    })
+
+    const session = await store.getSessionById('sess-intent')
+    expect(session.intent).toBe('Refactor symbol search to embeddings')
+    expect(session.intent_source).toBe('auto')
+
+    const intentBroadcasts = allBroadcasts.filter(
+      (m: any) => m.type === 'session_update' && 'intent' in m.data,
+    )
+    expect(intentBroadcasts).toHaveLength(1)
+    expect(intentBroadcasts[0].data.intent).toBe('Refactor symbol search to embeddings')
+    expect(intentBroadcasts[0].data.intentSource).toBe('auto')
+  })
+
+  test('does NOT overwrite a manual intent (sticky-manual rule)', async () => {
+    // Bootstrap the session with a manual intent.
+    await store.upsertSession('sess-manual', null, null, null, 500)
+    await store.updateSessionIntent('sess-manual', 'Real human-set intent', 'manual')
+
+    // Simulate a later UserPromptSubmit. Auto write should be a no-op.
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-manual',
+      agentId: 'sess-manual',
+      hookName: 'UserPromptSubmit',
+      timestamp: 1000,
+      payload: { prompt: 'a much later prompt' },
+    })
+
+    const session = await store.getSessionById('sess-manual')
+    expect(session.intent).toBe('Real human-set intent')
+    expect(session.intent_source).toBe('manual')
+
+    // No auto session_update broadcast should fire when the write is
+    // a no-op — the row didn't change.
+    const intentBroadcasts = allBroadcasts.filter(
+      (m: any) => m.type === 'session_update' && 'intent' in m.data,
+    )
+    expect(intentBroadcasts).toHaveLength(0)
+  })
+
+  test('non-UserPromptSubmit events do not derive an intent', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-other',
+      agentId: 'sess-other',
+      hookName: 'PreToolUse',
+      timestamp: 1000,
+      payload: { prompt: 'this should be ignored' },
+    })
+
+    const session = await store.getSessionById('sess-other')
+    expect(session.intent).toBeNull()
+    expect(session.intent_source).toBeNull()
+  })
+})
+
+describe('POST /api/events - file-touch capture for overlap detection', () => {
+  function readTouches(sessionId: string) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (store as any).db
+      .prepare(
+        'SELECT session_id, file_path, tool_name, touched_at FROM recent_file_touches WHERE session_id = ?',
+      )
+      .all(sessionId) as Array<{
+      session_id: string
+      file_path: string
+      tool_name: string
+      touched_at: number
+    }>
+  }
+
+  test('PreToolUse Edit records a file touch', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PreToolUse',
+      timestamp: 5000,
+      payload: { tool_name: 'Edit', tool_input: { file_path: '/repo/foo.ts' } },
+    })
+    const rows = readTouches('sess-touch')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      file_path: '/repo/foo.ts',
+      tool_name: 'Edit',
+      touched_at: 5000,
+    })
+  })
+
+  test('PostToolUse Read also records a touch', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PostToolUse',
+      timestamp: 5500,
+      payload: { tool_name: 'Read', tool_input: { file_path: '/repo/bar.ts' } },
+    })
+    const rows = readTouches('sess-touch')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].tool_name).toBe('Read')
+  })
+
+  test('Bash tool does NOT record a touch (no file_path semantics)', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PreToolUse',
+      timestamp: 5000,
+      payload: { tool_name: 'Bash', tool_input: { command: 'ls' } },
+    })
+    expect(readTouches('sess-touch')).toEqual([])
+  })
+
+  test('Non-tool hooks (UserPromptSubmit) do not record touches', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'UserPromptSubmit',
+      timestamp: 5000,
+      payload: { prompt: 'hi', tool_name: 'Edit', tool_input: { file_path: '/x.ts' } },
+    })
+    expect(readTouches('sess-touch')).toEqual([])
+  })
+
+  test('Unknown agent class does not record touches', async () => {
+    await postEvent({
+      agentClass: 'codex',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PreToolUse',
+      timestamp: 5000,
+      payload: { tool_name: 'Edit', tool_input: { file_path: '/x.ts' } },
+    })
+    expect(readTouches('sess-touch')).toEqual([])
+  })
+
+  test('Repeated touches on the same file UPSERT into one row', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PreToolUse',
+      timestamp: 5000,
+      payload: { tool_name: 'Read', tool_input: { file_path: '/repo/foo.ts' } },
+    })
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PreToolUse',
+      timestamp: 6000,
+      payload: { tool_name: 'Edit', tool_input: { file_path: '/repo/foo.ts' } },
+    })
+    const rows = readTouches('sess-touch')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].touched_at).toBe(6000)
+    expect(rows[0].tool_name).toBe('Edit')
+  })
+
+  test('emits an overlaps_update broadcast after a touch', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PreToolUse',
+      timestamp: 5000,
+      payload: { tool_name: 'Edit', tool_input: { file_path: '/repo/foo.ts' } },
+    })
+    const overlapMsgs = allBroadcasts.filter((m) => m?.type === 'overlaps_update')
+    expect(overlapMsgs).toHaveLength(1)
+  })
+
+  test('does NOT emit overlaps_update when the event has no file touches', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PreToolUse',
+      timestamp: 5000,
+      payload: { tool_name: 'Bash', tool_input: { command: 'ls' } },
+    })
+    const overlapMsgs = allBroadcasts.filter((m) => m?.type === 'overlaps_update')
+    expect(overlapMsgs).toHaveLength(0)
+  })
+
+  test('NotebookEdit records the notebook_path', async () => {
+    await postEvent({
+      agentClass: 'claude-code',
+      sessionId: 'sess-touch',
+      agentId: 'sess-touch',
+      hookName: 'PreToolUse',
+      timestamp: 5000,
+      payload: {
+        tool_name: 'NotebookEdit',
+        tool_input: { notebook_path: '/repo/notes.ipynb' },
+      },
+    })
+    const rows = readTouches('sess-touch')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].file_path).toBe('/repo/notes.ipynb')
   })
 })

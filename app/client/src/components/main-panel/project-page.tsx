@@ -4,6 +4,7 @@ import { useSessions } from '@/hooks/use-sessions'
 import { useProjects } from '@/hooks/use-projects'
 import { useUIStore } from '@/stores/ui-store'
 import { SessionList } from './session-list'
+import { OverlapBanner } from './overlap-banner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 export function ProjectPage() {
@@ -26,6 +27,7 @@ export function ProjectPage() {
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
+      <OverlapBanner projectId={selectedProjectId} />
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
         <div>
           <h1 className="text-base font-semibold">{project?.name ?? selectedProjectId}</h1>

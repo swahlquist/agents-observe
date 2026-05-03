@@ -86,8 +86,37 @@ async function fetchVoid(path: string, init?: RequestInit): Promise<void> {
   }
 }
 
+export interface OverlapPairFile {
+  filePath: string
+  aTouchedAt: number
+  bTouchedAt: number
+  aToolName: string
+  bToolName: string
+}
+export interface OverlapPair {
+  sessionA: string
+  sessionAIntent: string | null
+  sessionAIntentSource: 'manual' | 'auto' | null
+  sessionASlug: string | null
+  sessionAProjectId: number | null
+  sessionB: string
+  sessionBIntent: string | null
+  sessionBIntentSource: 'manual' | 'auto' | null
+  sessionBSlug: string | null
+  sessionBProjectId: number | null
+  files: OverlapPairFile[]
+  lastTouchedAt: number
+}
+export interface OverlapsResponse {
+  windowMs: number
+  since: number
+  pairs: OverlapPair[]
+}
+
 export const api = {
   getProjects: () => fetchJson<Project[]>('/projects'),
+  getOverlaps: (windowMs?: number) =>
+    fetchJson<OverlapsResponse>(`/overlaps${windowMs ? `?windowMs=${windowMs}` : ''}`),
   getPendingNotifications: (sinceTs: number) =>
     fetchJson<NotificationPayload[]>(`/notifications?since=${sinceTs}`),
   getRecentSessions: (limit?: number) =>
