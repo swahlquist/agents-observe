@@ -127,6 +127,19 @@ export interface ProjectGoalsResponse {
   goals: ProjectGoalWithLink[]
 }
 
+export interface ExternalTask {
+  id: string
+  title: string
+  url: string | null
+  status: string | null
+  dueAt: string | null
+}
+export interface ExternalTasksResponse {
+  configured: boolean
+  tasks: ExternalTask[]
+  cached: boolean
+}
+
 export const api = {
   getProjects: () => fetchJson<Project[]>('/projects'),
   getOverlaps: (windowMs?: number) =>
@@ -139,6 +152,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ goals }),
     }),
+  getExternalTasks: () => fetchJson<ExternalTasksResponse>('/external-tasks'),
   getPendingNotifications: (sinceTs: number) =>
     fetchJson<NotificationPayload[]>(`/notifications?since=${sinceTs}`),
   getRecentSessions: (limit?: number) =>

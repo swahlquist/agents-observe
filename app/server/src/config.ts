@@ -57,4 +57,22 @@ export const config = {
   consumerTtlMs: 30_000,
   sweepIntervalMs: 10_000,
   startupGraceMs: 60_000,
+
+  // Outgoing webhook (fire-and-forget POST on session start/stop/notification).
+  // Empty string disables. The optional secret is sent as `X-Observe-Secret`
+  // so the receiver can reject spoofed posts.
+  outgoingWebhookUrl: process.env.AGENTS_OBSERVE_OUTGOING_WEBHOOK_URL || '',
+  outgoingWebhookSecret: process.env.AGENTS_OBSERVE_OUTGOING_WEBHOOK_SECRET || '',
+  outgoingWebhookTimeoutMs: parseInt(
+    process.env.AGENTS_OBSERVE_OUTGOING_WEBHOOK_TIMEOUT_MS || '5000',
+    10,
+  ),
+
+  // Notion bridge for the /api/external-tasks endpoint. When either
+  // value is empty the endpoint reports `configured: false`.
+  notionToken: process.env.AGENTS_OBSERVE_NOTION_TOKEN || '',
+  notionTasksDatabaseId: process.env.AGENTS_OBSERVE_NOTION_TASKS_DATABASE_ID || '',
+  notionTasksDateProperty: process.env.AGENTS_OBSERVE_NOTION_TASKS_DATE_PROPERTY || 'Date',
+  notionTasksStatusProperty: process.env.AGENTS_OBSERVE_NOTION_TASKS_STATUS_PROPERTY || 'Status',
+  notionTasksCacheMs: parseInt(process.env.AGENTS_OBSERVE_NOTION_TASKS_CACHE_MS || '60000', 10),
 }

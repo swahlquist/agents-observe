@@ -24,6 +24,7 @@ import { config } from '../config'
 import { apiError } from '../errors'
 import { extractPromptSnippet } from '../utils/prompt-snippet'
 import { extractTouchedPaths } from '../utils/file-touch'
+import { postOutgoingWebhook } from '../services/outgoing-webhook'
 
 // Re-export so existing callers (and tests) keep working without
 // reaching into the utils dir.
@@ -278,6 +279,30 @@ router.post('/events', async (c) => {
         type: 'notification_clear',
         data: { sessionId: envelope.sessionId, ts: timestamp },
       })
+    }
+
+    // ---- Step 8b: outgoing webhook (fire-and-forget) ---------------------
+    // Triggers on session_start (the very first event we see for a
+    // session), session_stop, and notification-set. Skipped silently
+    // when AGENTS_OBSERVE_OUTGOING_WEBHOOK_URL is unset.
+    const webhookBase = {
+      ts: timestamp,
+      sessionId: envelope.sessionId,
+      sessionSlug: sessionAfter?.slug ?? null,
+      intent: sessionAfter?.intent ?? null,
+      intentSource: (sessionAfter?.intent_source as 'manual' | 'auto' | null) ?? null,
+      projectId: sessionAfter?.project_id ?? null,
+      projectSlug: sessionAfter?.project_slug ?? null,
+      projectName: sessionAfter?.project_name ?? null,
+    }
+    if (sessionBefore === null) {
+      postOutgoingWebhook({ type: 'session_start', ...webhookBase })
+    }
+    if (flags.stopsSession) {
+      postOutgoingWebhook({ type: 'session_stop', ...webhookBase })
+    }
+    if (pendingTransition === 'set') {
+      postOutgoingWebhook({ type: 'notification', ...webhookBase })
     }
 
     const responseBody: Record<string, unknown> = { id: eventId }

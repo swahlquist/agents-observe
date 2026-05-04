@@ -49,6 +49,40 @@ server directly.
 
 ---
 
+## External bridges
+
+Optional integrations the server reads at runtime. Leave any group empty
+to disable that bridge silently.
+
+### Outgoing webhook
+
+Fire-and-forget POST on session start, session stop, and notification.
+Useful for piping events into n8n, Slack relays, Make.com, etc.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENTS_OBSERVE_OUTGOING_WEBHOOK_URL` | *(unset)* | URL the server POSTs lifecycle events to. Empty disables. |
+| `AGENTS_OBSERVE_OUTGOING_WEBHOOK_SECRET` | *(unset)* | Optional shared secret. When set, sent as `X-Observe-Secret` so the receiver can reject spoofed posts. |
+| `AGENTS_OBSERVE_OUTGOING_WEBHOOK_TIMEOUT_MS` | `5000` | Per-request timeout (ms) before the POST is aborted. |
+
+Body shape: `{ type: 'session_start' | 'session_stop' | 'notification', ts, sessionId, sessionSlug, intent, intentSource, projectId, projectSlug, projectName }`.
+
+### Notion tasks (`/api/external-tasks`)
+
+Pulls "today's tasks" from a Notion database so the dashboard can show
+human work alongside agent activity. Returns `{ configured: false }`
+when either token or database id is missing.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENTS_OBSERVE_NOTION_TOKEN` | *(unset)* | Notion internal-integration token. |
+| `AGENTS_OBSERVE_NOTION_TASKS_DATABASE_ID` | *(unset)* | Database id to query. |
+| `AGENTS_OBSERVE_NOTION_TASKS_DATE_PROPERTY` | `Date` | Name of the date property to filter on (`on_or_before` today). |
+| `AGENTS_OBSERVE_NOTION_TASKS_STATUS_PROPERTY` | `Status` | Name of the status/select/checkbox property to surface. |
+| `AGENTS_OBSERVE_NOTION_TASKS_CACHE_MS` | `60000` | In-memory cache TTL so the UI can poll without hammering Notion. |
+
+---
+
 ## Docker / runtime selection
 
 Controls where and how the server runs.
