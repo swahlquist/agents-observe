@@ -11,6 +11,7 @@ import type {
   StoredEvent,
   OrphanRepairResult,
   OverlapRow,
+  ProjectGoal,
 } from './types'
 import { extractPromptSnippet } from '../utils/prompt-snippet'
 
@@ -40,7 +41,7 @@ export class SqliteAdapter implements EventStore {
     `)
 
     // Migration: rebuild projects table to drop unused columns (metadata,
-    // cwd, transcript_path). Idempotent — guarded by PRAGMA check.
+    // cwd, transcript_path). Idempotent: guarded by PRAGMA check.
     const projectCols = this.db.prepare("PRAGMA table_info('projects')").all() as { name: string }[]
     const projectsHasMetadata = projectCols.some((c) => c.name === 'metadata')
     const projectsHasCwd = projectCols.some((c) => c.name === 'cwd')
@@ -64,6 +65,18 @@ export class SqliteAdapter implements EventStore {
         COMMIT;
         PRAGMA foreign_keys=ON;
       `)
+    }
+
+    // Goals: JSON-encoded array of {id, text, done} on each project.
+    // Stored as TEXT so the schema stays simple; parsing is the caller's
+    // job. Auto-link to a session intent is computed at read time, so
+    // the column never holds a sessionId field. Re-query columns since
+    // the rebuild above strips everything to the canonical 5-column shape.
+    const projectColsAfter = this.db.prepare("PRAGMA table_info('projects')").all() as {
+      name: string
+    }[]
+    if (!projectColsAfter.some((c) => c.name === 'goals')) {
+      this.db.exec("ALTER TABLE projects ADD COLUMN goals TEXT NOT NULL DEFAULT '[]'")
     }
 
     this.db.exec(`
@@ -465,6 +478,25 @@ export class SqliteAdapter implements EventStore {
     this.db
       .prepare('UPDATE projects SET name = ?, updated_at = ? WHERE id = ?')
       .run(name, Date.now(), projectId)
+  }
+
+  async getProjectGoals(projectId: number): Promise<ProjectGoal[]> {
+    const row = this.db.prepare('SELECT goals FROM projects WHERE id = ?').get(projectId) as
+      | { goals: string }
+      | undefined
+    if (!row || !row.goals) return []
+    try {
+      const parsed = JSON.parse(row.goals)
+      return Array.isArray(parsed) ? (parsed as ProjectGoal[]) : []
+    } catch {
+      return []
+    }
+  }
+
+  async setProjectGoals(projectId: number, goals: ProjectGoal[]): Promise<void> {
+    this.db
+      .prepare('UPDATE projects SET goals = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(goals), Date.now(), projectId)
   }
 
   async isSlugAvailable(slug: string): Promise<boolean> {

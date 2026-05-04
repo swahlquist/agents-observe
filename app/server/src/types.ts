@@ -152,6 +152,7 @@ export type WSMessage =
   | { type: 'session_update'; data: Session }
   | { type: 'project_update'; data: { id: number; name: string } }
   | { type: 'overlaps_update' }
+  | { type: 'project_goals_update'; data: { projectId: number } }
 
 // Messages FROM clients
 export type WSClientMessage = { type: 'subscribe'; sessionId: string } | { type: 'unsubscribe' }

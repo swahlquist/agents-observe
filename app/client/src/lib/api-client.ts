@@ -113,10 +113,32 @@ export interface OverlapsResponse {
   pairs: OverlapPair[]
 }
 
+export interface ProjectGoal {
+  id: string
+  text: string
+  done: boolean
+}
+export interface ProjectGoalWithLink extends ProjectGoal {
+  linkedSessionId: string | null
+  linkedSessionSlug: string | null
+  linkedSessionIntent: string | null
+}
+export interface ProjectGoalsResponse {
+  goals: ProjectGoalWithLink[]
+}
+
 export const api = {
   getProjects: () => fetchJson<Project[]>('/projects'),
   getOverlaps: (windowMs?: number) =>
     fetchJson<OverlapsResponse>(`/overlaps${windowMs ? `?windowMs=${windowMs}` : ''}`),
+  getProjectGoals: (projectId: number) =>
+    fetchJson<ProjectGoalsResponse>(`/projects/${projectId}/goals`),
+  updateProjectGoals: (projectId: number, goals: ProjectGoal[]) =>
+    fetchJson<{ ok: true }>(`/projects/${projectId}/goals`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goals }),
+    }),
   getPendingNotifications: (sinceTs: number) =>
     fetchJson<NotificationPayload[]>(`/notifications?since=${sinceTs}`),
   getRecentSessions: (limit?: number) =>

@@ -1951,3 +1951,59 @@ describe('SqliteAdapter - findOverlappingSessions', () => {
     expect(pairs).toEqual(['sA-sB', 'sA-sC', 'sB-sC'])
   })
 })
+
+// ---------------------------------------------------------------------------
+// Project goals
+// ---------------------------------------------------------------------------
+describe('SqliteAdapter - project goals', () => {
+  test('new project starts with an empty goals array', async () => {
+    const projectId = await store.createProject('p', 'P')
+    const goals = await store.getProjectGoals(projectId)
+    expect(goals).toEqual([])
+  })
+
+  test('setProjectGoals round-trips through JSON', async () => {
+    const projectId = await store.createProject('p', 'P')
+    await store.setProjectGoals(projectId, [
+      { id: 'g1', text: 'Refactor auth', done: false },
+      { id: 'g2', text: 'Ship banner', done: true },
+    ])
+    const goals = await store.getProjectGoals(projectId)
+    expect(goals).toEqual([
+      { id: 'g1', text: 'Refactor auth', done: false },
+      { id: 'g2', text: 'Ship banner', done: true },
+    ])
+  })
+
+  test('setProjectGoals overwrites prior contents and bumps updated_at', async () => {
+    const projectId = await store.createProject('p', 'P')
+    await store.setProjectGoals(projectId, [{ id: 'g1', text: 'old', done: false }])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const before = (store as any).db
+      .prepare('SELECT updated_at FROM projects WHERE id = ?')
+      .get(projectId) as { updated_at: number }
+    await new Promise((r) => setTimeout(r, 5))
+    await store.setProjectGoals(projectId, [{ id: 'g1', text: 'new', done: true }])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const after = (store as any).db
+      .prepare('SELECT updated_at, goals FROM projects WHERE id = ?')
+      .get(projectId) as { updated_at: number; goals: string }
+    expect(after.updated_at).toBeGreaterThan(before.updated_at)
+    expect(JSON.parse(after.goals)).toEqual([{ id: 'g1', text: 'new', done: true }])
+  })
+
+  test('getProjectGoals returns [] for a missing project', async () => {
+    const goals = await store.getProjectGoals(999)
+    expect(goals).toEqual([])
+  })
+
+  test('getProjectGoals tolerates malformed JSON in the column', async () => {
+    const projectId = await store.createProject('p', 'P')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(store as any).db
+      .prepare('UPDATE projects SET goals = ? WHERE id = ?')
+      .run('not valid json {{{', projectId)
+    const goals = await store.getProjectGoals(projectId)
+    expect(goals).toEqual([])
+  })
+})

@@ -186,6 +186,9 @@ export function useWebSocket(sessionId: string | null) {
         // (single indexed query + tiny JSON), so even bursty touches
         // don't cause meaningful traffic.
         queryClient.invalidateQueries({ queryKey: ['overlaps'] })
+      } else if (msg.type === 'project_goals_update') {
+        const { projectId } = msg.data
+        queryClient.invalidateQueries({ queryKey: ['project-goals', projectId] })
       } else if (msg.type === 'activity') {
         const { sessionId, projectId } = msg.data
         useUIStore.getState().pulseSession(sessionId, projectId)

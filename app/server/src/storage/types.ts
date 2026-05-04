@@ -48,6 +48,18 @@ export interface EventStore {
   getProjectById(id: number): Promise<any | null>
   getProjectBySlug(slug: string): Promise<any | null>
   updateProjectName(projectId: number, name: string): Promise<void>
+  /**
+   * Read the parsed goals array for a project. Returns `[]` if the
+   * project doesn't exist or its goals column is empty / malformed,
+   * so callers never have to guard against null.
+   */
+  getProjectGoals(projectId: number): Promise<ProjectGoal[]>
+  /**
+   * Replace the full goals array. The route layer is the source of
+   * truth for shape validation; this method just JSON-encodes and
+   * writes. Bumps `updated_at`.
+   */
+  setProjectGoals(projectId: number, goals: ProjectGoal[]): Promise<void>
   isSlugAvailable(slug: string): Promise<boolean>
   /**
    * Find-or-create a project by slug. Uses INSERT ... ON CONFLICT(slug)
@@ -173,6 +185,12 @@ export interface EventStore {
    * Returns a summary of what was repaired.
    */
   repairOrphans(): Promise<OrphanRepairResult>
+}
+
+export interface ProjectGoal {
+  id: string
+  text: string
+  done: boolean
 }
 
 export interface OverlapRow {

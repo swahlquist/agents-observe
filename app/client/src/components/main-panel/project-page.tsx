@@ -5,6 +5,7 @@ import { useProjects } from '@/hooks/use-projects'
 import { useUIStore } from '@/stores/ui-store'
 import { SessionList } from './session-list'
 import { OverlapBanner } from './overlap-banner'
+import { ProjectGoalsPanel } from './project-goals-panel'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 export function ProjectPage() {
@@ -61,6 +62,7 @@ export function ProjectPage() {
           </TooltipContent>
         </Tooltip>
       </div>
+      {selectedProjectId != null && <ProjectGoalsPanel projectId={selectedProjectId} />}
       <div className="flex-1 overflow-y-auto">
         {isLoading && (
           <div className="flex items-center justify-center h-32 text-xs text-muted-foreground">

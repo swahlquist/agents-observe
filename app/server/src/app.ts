@@ -17,6 +17,7 @@ import consumerRouter from './routes/consumer'
 import callbacksRouter from './routes/callbacks'
 import notificationsRouter from './routes/notifications'
 import overlapsRouter from './routes/overlaps'
+import goalsRouter from './routes/goals'
 import changelogRouter from './routes/changelog'
 
 type Env = {
@@ -57,6 +58,7 @@ export function createApp(
   app.route('/api', callbacksRouter)
   app.route('/api', notificationsRouter)
   app.route('/api', overlapsRouter)
+  app.route('/api', goalsRouter)
   app.route('/api', changelogRouter)
 
   // Global error handler — catches any uncaught exception from a route

@@ -165,5 +165,6 @@ export type WSMessage =
       data: { sessionId: string; projectId: number | null; eventId: number; ts: number }
     }
   | { type: 'overlaps_update' }
+  | { type: 'project_goals_update'; data: { projectId: number } }
 
 export type WSClientMessage = { type: 'subscribe'; sessionId: string } | { type: 'unsubscribe' }
