@@ -45,3 +45,6 @@ bak/
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 .worktrees/
+
+# Server log
+server.log
