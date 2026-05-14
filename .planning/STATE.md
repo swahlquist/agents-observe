@@ -2,8 +2,8 @@
 
 **Project:** Agents Observe — Founder-Mode Home View + Task/Session Tracking (v1)
 **Initialized:** 2026-05-13
-**Current Phase:** None (pre-planning)
-**Next Action:** `/gsd-discuss-phase 1a` (or `/gsd-plan-phase 1a` to skip discussion)
+**Current Phase:** 1a — Home View + Derived Status (context captured, ready to plan)
+**Next Action:** `/clear` then `/gsd-plan-phase 1a` (then `/adversary-review` on the plan before `/gsd-execute-phase 1a`)
 
 ## Status
 
@@ -15,7 +15,7 @@
 | REQUIREMENTS.md | Created |
 | ROADMAP.md | Created |
 | STATE.md | Created |
-| Phase 1a discuss | Pending |
+| Phase 1a discuss | Done (auto mode) — 01A-CONTEXT.md + 01A-DISCUSSION-LOG.md |
 | Phase 1a plan | Pending |
 | Phase 1a execute | Pending |
 | Phase 1b discuss | Pending |
@@ -25,7 +25,7 @@
 ## Phase Memory
 
 ### Phase 1a
-- Not yet discussed.
+- 2026-05-13: Context captured in auto mode (user "work without stopping" instruction active). 11 gray areas resolved: status thresholds (60s WORKING / 30min ABANDONED matching existing pulse + overlap windows), notification text parsing via regex, lastActionLabel format, tab title format, Web Audio bell spec, client-side category icon mapping, 8-color session hash, expanded-by-default project groups, local-midnight finished-today cutoff, placeholder Overview tab, per-section empty states. Two plans planned: Plan 1 server derivation (3d), Plan 2 client redesign (3-4d). No schema migration in 1a. See `.planning/phases/01A-home-view-derived-status/01A-CONTEXT.md`.
 
 ### Phase 1b
 - Not yet discussed. Blocked on Phase 1a shipping plus 24 hours of live use.
@@ -48,4 +48,4 @@ See `PROJECT.md` § Key Decisions for the full list. Highlights:
 - After goals → tasks migration ships in Phase 1b, decide whether to drop the `projects.goals` column in a follow-up release or keep it as a denormalized cache.
 
 ---
-*Last updated: 2026-05-13 after initialization*
+*Last updated: 2026-05-13 after Phase 1a context capture*
