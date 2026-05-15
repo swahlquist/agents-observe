@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { renderHook, act, cleanup } from '@testing-library/react'
-import { useBell } from './use-bell'
+import { useBell, __resetBellStateForTests } from './use-bell'
 import { useUIStore } from '@/stores/ui-store'
 
 // Shared spy state across tests. Each test resets via beforeEach.
@@ -91,6 +91,9 @@ beforeEach(() => {
   ;(window as unknown as { AudioContext: typeof AudioContext }).AudioContext =
     makeMockAudioContextClass()
   useUIStore.setState({ bellEnabled: true })
+  // Reset module-scope state (CR-02 / WR-02) so each test starts from
+  // a clean false-prev / no-AudioContext slate.
+  __resetBellStateForTests()
 })
 
 afterEach(() => {
@@ -155,6 +158,28 @@ describe('useBell', () => {
     const viaSetter = osc.frequency.value === 800
     const viaSchedule = osc.frequency.setValueAtTime.mock.calls.some(([v]) => v === 800)
     expect(viaSetter || viaSchedule).toBe(true)
+  })
+
+  it('does not re-fire on remount while needsYouCount stays > 0 (CR-02)', () => {
+    // First mount: count goes 0 -> 2, bell fires once.
+    const first = renderHook(({ count }) => useBell(count), {
+      initialProps: { count: 0 },
+    })
+    first.rerender({ count: 2 })
+    expect(bellSpy.createOscillatorCalls).toBe(1)
+
+    // Simulate HomePage unmount (user clicks into a project sidebar).
+    first.unmount()
+
+    // Remount with count STILL > 0 (user navigates back to Home, work
+    // still pending). The bell must NOT ring again. Pre-CR-02, the
+    // useRef reset on remount and the next effect treated count=2 as a
+    // fresh false-to-true flip; the module-scope flag prevents that.
+    const second = renderHook(({ count }) => useBell(count), {
+      initialProps: { count: 2 },
+    })
+    expect(bellSpy.createOscillatorCalls).toBe(1)
+    second.unmount()
   })
 
   it('does not throw when AudioContext is unavailable', () => {
