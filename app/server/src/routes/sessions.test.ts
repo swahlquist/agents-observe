@@ -513,15 +513,18 @@ describe('GET /api/sessions/recent: derived status fields and perf budget', () =
 
   test('skips per-row derivation when limit > 50 (New-H2 mitigation)', async () => {
     // Seed 6 rows; limit=10000 should trigger the placeholder branch.
+    // Use a fresh last_activity so the WR-01 recency cascade in the
+    // placeholder lands on WORKING (within 60s window).
+    const now = Date.now()
     const rows = Array.from({ length: 6 }, (_, i) => ({
       id: `sess${i}`,
       project_id: 1,
       project_name: 'P',
       project_slug: 'p',
       slug: null,
-      started_at: 1000,
-      stopped_at: i === 5 ? 2000 : null,
-      last_activity: 1000,
+      started_at: now - 1_000,
+      stopped_at: i === 5 ? now - 500 : null,
+      last_activity: now - 1_000,
       pending_notification_ts: null,
       metadata: null,
       agent_count: 0,
@@ -534,14 +537,58 @@ describe('GET /api/sessions/recent: derived status fields and perf budget', () =
     const body = await res.json()
     expect(body.length).toBe(6)
     expect(mockStore.getRecentEventsForSession).toHaveBeenCalledTimes(0)
-    // Placeholders: WORKING for active rows, FINISHED for the one
-    // with stopped_at, other fields null/false.
+    // Placeholders: WORKING for active rows (fresh last_activity),
+    // FINISHED for the stopped row, other fields null/false.
     expect(body[0].derivedStatus).toBe('WORKING')
     expect(body[5].derivedStatus).toBe('FINISHED')
     expect(body[0].statusDetail).toBeNull()
     expect(body[0].needsYou).toBe(false)
     expect(body[0].lastActionLabel).toBeNull()
     expect(body[0].lastActionAt).toBeNull()
+  })
+
+  test('placeholder branch returns IDLE / ABANDONED for stale last_activity (WR-01)', async () => {
+    // Pre-WR-01: every non-stopped row was stamped WORKING regardless of
+    // recency, so consumers of derivedStatus on a high-limit endpoint saw
+    // "Working" badges on idle and abandoned sessions. Now the placeholder
+    // mirrors deriveStatus()'s recency cascade for non-Notification states.
+    const now = Date.now()
+    const rows = [
+      // Fresh: within the 60s WORKING window.
+      { id: 'sess-working', last_activity: now - 10_000, started_at: now - 60_000 },
+      // 5 minutes idle: between 60s and 30min.
+      { id: 'sess-idle', last_activity: now - 5 * 60_000, started_at: now - 6 * 60_000 },
+      // 45 minutes idle: past the 30min ABANDONED cutoff.
+      { id: 'sess-abandoned', last_activity: now - 45 * 60_000, started_at: now - 46 * 60_000 },
+      // Null last_activity, fresh started_at: fall back to started_at,
+      // still in WORKING window.
+      { id: 'sess-null-fresh', last_activity: null, started_at: now - 30_000 },
+    ].map((base) => ({
+      project_id: 1,
+      project_name: 'P',
+      project_slug: 'p',
+      slug: null,
+      stopped_at: null,
+      pending_notification_ts: null,
+      metadata: null,
+      agent_count: 0,
+      event_count: 0,
+      agent_classes: null,
+      ...base,
+    }))
+    mockStore.getRecentSessions.mockResolvedValue(rows)
+
+    const res = await app.request('/api/sessions/recent?limit=10000')
+    const body = await res.json()
+    const byId = new Map<string, { derivedStatus: string }>(
+      body.map((row: { id: string; derivedStatus: string }) => [row.id, row]),
+    )
+    expect(byId.get('sess-working')?.derivedStatus).toBe('WORKING')
+    expect(byId.get('sess-idle')?.derivedStatus).toBe('IDLE')
+    expect(byId.get('sess-abandoned')?.derivedStatus).toBe('ABANDONED')
+    expect(byId.get('sess-null-fresh')?.derivedStatus).toBe('WORKING')
+    // Zero event lookups: still the placeholder fast path.
+    expect(mockStore.getRecentEventsForSession).toHaveBeenCalledTimes(0)
   })
 
   test('performs full derivation when limit <= 50 (home view path)', async () => {

@@ -7,6 +7,7 @@ import {
   deriveStatus,
   coerceWireLastActivity,
   type DerivedStatusFields,
+  type SessionStatus,
 } from '../lib/derive-status'
 
 // Legacy two-state status field; 7+ in-repo consumers still read it
@@ -25,15 +26,60 @@ function deriveSessionStatus(stoppedAt: number | null | undefined): string {
 const DERIVED_LIMIT_THRESHOLD = 50
 const RECENT_EVENTS_PER_SESSION = 50
 
+// Recency cutoffs match deriveStatus(): WORKING / IDLE / ABANDONED.
+// Mirrored here so the placeholder branch produces the same status
+// the full derivation would for non-pending sessions (WR-01).
+const PLACEHOLDER_WORKING_WINDOW_MS = 60_000
+const PLACEHOLDER_IDLE_CUTOFF_MS = 30 * 60_000
+
 /**
  * Placeholder derived fields used when the request limit exceeds
  * DERIVED_LIMIT_THRESHOLD. Returns shape-stable wire fields without
  * any per-row event lookup. Trade-off documented in the threat model
  * (T-01A-01-04 mitigation).
+ *
+ * WR-01: we compute WORKING / IDLE / ABANDONED from stopped_at +
+ * last_activity (already on the row) instead of stamping every
+ * non-stopped session as WORKING. This is O(1) per row, costs no
+ * extra queries, and matches deriveStatus()'s output for all
+ * non-Notification states. We still lose the WAITING_* distinction
+ * (would need event lookup), and statusDetail / needsYou /
+ * lastActionLabel / lastActionAt stay null/false; consumers reading
+ * those fields from a placeholder endpoint know the wire-shape values
+ * are not authoritative for those four fields, but at least
+ * `derivedStatus` is consistent with full derivation.
  */
-function placeholderDerived(stoppedAt: number | null | undefined): DerivedStatusFields {
+function placeholderDerived(row: {
+  stopped_at?: number | null
+  last_activity?: number | null
+  started_at?: number | null
+}, now: number): DerivedStatusFields {
+  if (row.stopped_at) {
+    return {
+      derivedStatus: 'FINISHED',
+      statusDetail: null,
+      needsYou: false,
+      lastActionLabel: null,
+      lastActionAt: null,
+    }
+  }
+  // NULL last_activity substitutes started_at (same H3 mitigation as
+  // deriveStatus()). If both are null the session is truly fresh; treat
+  // as WORKING.
+  const referenceTs = row.last_activity ?? row.started_at ?? null
+  let derivedStatus: SessionStatus = 'WORKING'
+  if (referenceTs !== null) {
+    const age = now - referenceTs
+    if (age < PLACEHOLDER_WORKING_WINDOW_MS) {
+      derivedStatus = 'WORKING'
+    } else if (age < PLACEHOLDER_IDLE_CUTOFF_MS) {
+      derivedStatus = 'IDLE'
+    } else {
+      derivedStatus = 'ABANDONED'
+    }
+  }
   return {
-    derivedStatus: stoppedAt ? 'FINISHED' : 'WORKING',
+    derivedStatus,
     statusDetail: null,
     needsYou: false,
     lastActionLabel: null,
@@ -104,13 +150,14 @@ router.get('/sessions/recent', async (c) => {
   const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) : 20
   const rows = await store.getRecentSessions(limit)
 
+  const now = Date.now()
+
   // High-limit callers skip per-row derivation; home view (limit=30)
   // gets full derivation.
   if (limit > DERIVED_LIMIT_THRESHOLD) {
-    return c.json(rows.map((r: any) => rowToRecentSession(r, placeholderDerived(r.stopped_at))))
+    return c.json(rows.map((r: any) => rowToRecentSession(r, placeholderDerived(r, now))))
   }
 
-  const now = Date.now()
   const enriched = await Promise.all(
     rows.map(async (r: any) => {
       const events = await store.getRecentEventsForSession(r.id, RECENT_EVENTS_PER_SESSION)
@@ -131,7 +178,11 @@ router.get('/sessions/unassigned', async (c) => {
   const rows = await store.getUnassignedSessions(limit)
   // Sidebar reads legacy `status`, not `derivedStatus`. Use
   // placeholders to avoid paying for per-row event lookups here.
-  return c.json(rows.map((r: any) => rowToRecentSession(r, placeholderDerived(r.stopped_at))))
+  // Per WR-01, placeholders still compute WORKING / IDLE / ABANDONED
+  // from last_activity so any future consumer of derivedStatus on this
+  // endpoint sees consistent values for non-Notification states.
+  const now = Date.now()
+  return c.json(rows.map((r: any) => rowToRecentSession(r, placeholderDerived(r, now))))
 })
 
 // GET /sessions/:id
