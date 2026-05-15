@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v0.9.5
 milestone_name: milestone
-current_phase: 1a Home View + Derived Status (plans written, ready for adversary-review)
+current_phase: 01A
 status: unknown
-last_updated: "2026-05-14T16:05:48.504Z"
+last_updated: "2026-05-15T07:35:35.526Z"
 progress:
   total_phases: 2
   completed_phases: 0
@@ -17,7 +17,7 @@ progress:
 
 **Project:** Agents Observe — Founder-Mode Home View + Task/Session Tracking (v1)
 **Initialized:** 2026-05-13
-**Current Phase:** 1a Home View + Derived Status (plans written, ready for adversary-review)
+**Current Phase:** 01A
 **Next Action:** `/adversary-review .planning/phases/01A-home-view-derived-status/01A-*-PLAN.md`, block on Critical/High findings, then `/gsd-execute-phase 1a`
 
 ## Status
