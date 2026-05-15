@@ -172,12 +172,21 @@ export function useWebSocket(sessionId: string | null) {
           console.debug('[WS] Project update → invalidating projects')
         }
       } else if (msg.type === 'notification') {
+        // Invalidate the home-page recent-sessions cache so derived
+        // fields (needsYou, derivedStatus, lastActionLabel, lastActionAt)
+        // refetch reactively when a permission Notification arrives.
+        // Without this, the bell + tab title side effects never observe
+        // the flip on real traffic.
+        queryClient.invalidateQueries({ queryKey: ['recent-sessions'] })
         const { sessionId, projectId, ts } = msg.data
         pushNotification({ sessionId, projectId, ts })
         if (logLevel === 'trace') {
           console.debug(`[WS] Notification → session ${sessionId.slice(0, 8)}`)
         }
       } else if (msg.type === 'notification_clear') {
+        // Mirror the notification branch: a clear is also a needsYou
+        // transition, just in the opposite direction.
+        queryClient.invalidateQueries({ queryKey: ['recent-sessions'] })
         const { sessionId, ts } = msg.data
         clearNotification(sessionId, ts)
       } else if (msg.type === 'overlaps_update') {
