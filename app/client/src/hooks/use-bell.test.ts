@@ -18,7 +18,10 @@ interface BellSpyState {
     type: OscillatorType
   }>
   gains: Array<{
-    gain: { setValueAtTime: ReturnType<typeof vi.fn>; linearRampToValueAtTime: ReturnType<typeof vi.fn> }
+    gain: {
+      setValueAtTime: ReturnType<typeof vi.fn>
+      linearRampToValueAtTime: ReturnType<typeof vi.fn>
+    }
     connect: ReturnType<typeof vi.fn>
   }>
   currentTime: number

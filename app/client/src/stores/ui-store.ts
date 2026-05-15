@@ -152,6 +152,14 @@ interface UIState {
   notificationsEnabled: boolean
   setNotificationsEnabled: (enabled: boolean) => void
 
+  // Home-view audible bell. Plays a single short sine tone on every
+  // false-to-true flip of the home view's needsYou count. Persisted to
+  // localStorage under the bell mute key (see setter below) using the
+  // strings 'on' or 'off'; the tab title side effect is unconditional
+  // and not gated by this toggle.
+  bellEnabled: boolean
+  setBellEnabled: (enabled: boolean) => void
+
   // Rewind mode: freezes the event/timeline view at a snapshot of events
   rewindMode: boolean
   frozenEvents: EnrichedEvent[] | null
@@ -467,6 +475,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   setNotificationsEnabled: (enabled) => {
     localStorage.setItem('agents-observe-notifications', enabled ? 'on' : 'off')
     set({ notificationsEnabled: enabled })
+  },
+
+  bellEnabled: localStorage.getItem('agents-observe-bell') !== 'off',
+  setBellEnabled: (enabled) => {
+    localStorage.setItem('agents-observe-bell', enabled ? 'on' : 'off')
+    set({ bellEnabled: enabled })
   },
 
   rewindMode: false,
