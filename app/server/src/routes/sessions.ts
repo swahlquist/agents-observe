@@ -3,9 +3,42 @@ import { Hono } from 'hono'
 import type { EventStore } from '../storage/types'
 import { config } from '../config'
 import { apiError } from '../errors'
+import {
+  deriveStatus,
+  coerceWireLastActivity,
+  type DerivedStatusFields,
+} from '../lib/derive-status'
 
+// Legacy two-state status field; 7+ in-repo consumers still read it
+// (sidebar Unassigned bucket, settings tabs, modals, labels,
+// session-list.tsx). Phase 1b migrates those consumers and removes
+// this helper. Do NOT delete in Phase 1a (H1 mitigation).
 function deriveSessionStatus(stoppedAt: number | null | undefined): string {
   return stoppedAt ? 'ended' : 'active'
+}
+
+// High-limit callers (settings, projects-tab) skip per-row event
+// derivation to avoid the 1+10000-query storm under TanStack prefix
+// invalidation. Home view's useRecentSessions(30) is well under the
+// cap and gets full derivation. New-H2 mitigation: bounds total
+// per-request event lookups at min(rowCount, DERIVED_LIMIT_THRESHOLD).
+const DERIVED_LIMIT_THRESHOLD = 50
+const RECENT_EVENTS_PER_SESSION = 50
+
+/**
+ * Placeholder derived fields used when the request limit exceeds
+ * DERIVED_LIMIT_THRESHOLD. Returns shape-stable wire fields without
+ * any per-row event lookup. Trade-off documented in the threat model
+ * (T-01A-01-04 mitigation).
+ */
+function placeholderDerived(stoppedAt: number | null | undefined): DerivedStatusFields {
+  return {
+    derivedStatus: stoppedAt ? 'FINISHED' : 'WORKING',
+    statusDetail: null,
+    needsYou: false,
+    lastActionLabel: null,
+    lastActionAt: null,
+  }
 }
 
 function parseAgentClasses(raw: unknown): string[] {
@@ -25,7 +58,18 @@ const LOG_LEVEL = config.logLevel
 
 const router = new Hono<Env>()
 
-function rowToRecentSession(r: any) {
+/**
+ * Compose the wire-shape response row. Existing legacy fields are
+ * kept verbatim (including the two-state `status` field consumers
+ * still read). The five new HOME-01 derived fields are appended.
+ *
+ * `lastActivity` is coerced via `coerceWireLastActivity` so the wire
+ * field is never null (Round 3 New-H mitigation: keeps the existing
+ * client type `RecentSession.lastActivity: number` honest, avoids
+ * NaN at the three call sites that feed it to formatRelativeTime
+ * and numeric sort).
+ */
+function rowToRecentSession(r: any, derived: DerivedStatusFields) {
   return {
     id: r.id,
     projectId: r.project_id,
@@ -42,8 +86,15 @@ function rowToRecentSession(r: any) {
     metadata: r.metadata ? JSON.parse(r.metadata) : null,
     agentCount: r.agent_count,
     eventCount: r.event_count,
-    lastActivity: r.last_activity,
+    lastActivity: coerceWireLastActivity(r),
     agentClasses: parseAgentClasses(r.agent_classes),
+    // New HOME-01 fields. Legacy `status` above stays unchanged for
+    // the 7+ in-repo consumers still reading it.
+    derivedStatus: derived.derivedStatus,
+    statusDetail: derived.statusDetail,
+    needsYou: derived.needsYou,
+    lastActionLabel: derived.lastActionLabel,
+    lastActionAt: derived.lastActionAt,
   }
 }
 
@@ -52,7 +103,22 @@ router.get('/sessions/recent', async (c) => {
   const store = c.get('store')
   const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) : 20
   const rows = await store.getRecentSessions(limit)
-  return c.json(rows.map(rowToRecentSession))
+
+  // High-limit callers skip per-row derivation; home view (limit=30)
+  // gets full derivation.
+  if (limit > DERIVED_LIMIT_THRESHOLD) {
+    return c.json(rows.map((r: any) => rowToRecentSession(r, placeholderDerived(r.stopped_at))))
+  }
+
+  const now = Date.now()
+  const enriched = await Promise.all(
+    rows.map(async (r: any) => {
+      const events = await store.getRecentEventsForSession(r.id, RECENT_EVENTS_PER_SESSION)
+      const derived = deriveStatus(r, events, now)
+      return rowToRecentSession(r, derived)
+    }),
+  )
+  return c.json(enriched)
 })
 
 // GET /sessions/unassigned — sessions with project_id IS NULL, used by
@@ -63,7 +129,9 @@ router.get('/sessions/unassigned', async (c) => {
   const store = c.get('store')
   const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) : 100
   const rows = await store.getUnassignedSessions(limit)
-  return c.json(rows.map(rowToRecentSession))
+  // Sidebar reads legacy `status`, not `derivedStatus`. Use
+  // placeholders to avoid paying for per-row event lookups here.
+  return c.json(rows.map((r: any) => rowToRecentSession(r, placeholderDerived(r.stopped_at))))
 })
 
 // GET /sessions/:id
@@ -72,6 +140,11 @@ router.get('/sessions/:id', async (c) => {
   const sessionId = decodeURIComponent(c.req.param('id'))
   const row = await store.getSessionById(sessionId)
   if (!row) return apiError(c, 404, 'Session not found')
+
+  // Single-row endpoint: always derive. Cost is 1 + 1.
+  const events = await store.getRecentEventsForSession(sessionId, RECENT_EVENTS_PER_SESSION)
+  const derived = deriveStatus(row, events, Date.now())
+
   return c.json({
     id: row.id,
     projectId: row.project_id,
@@ -88,8 +161,14 @@ router.get('/sessions/:id', async (c) => {
     metadata: row.metadata ? JSON.parse(row.metadata) : null,
     agentCount: row.agent_count,
     eventCount: row.event_count,
-    lastActivity: row.last_activity,
+    lastActivity: coerceWireLastActivity(row),
     agentClasses: parseAgentClasses(row.agent_classes),
+    // New HOME-01 fields. Legacy `status` above stays unchanged.
+    derivedStatus: derived.derivedStatus,
+    statusDetail: derived.statusDetail,
+    needsYou: derived.needsYou,
+    lastActionLabel: derived.lastActionLabel,
+    lastActionAt: derived.lastActionAt,
   })
 })
 

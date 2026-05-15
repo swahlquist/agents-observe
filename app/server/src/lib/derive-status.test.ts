@@ -9,11 +9,7 @@
 // published-text policy violation.
 
 import { describe, it, expect } from 'vitest'
-import {
-  deriveStatus,
-  coerceWireLastActivity,
-  type SessionStatus,
-} from './derive-status'
+import { deriveStatus, coerceWireLastActivity, type SessionStatus } from './derive-status'
 
 // Minimal structural session-row fixture builder. Matches the shape
 // returned by getRecentSessions / getSessionById (id, stopped_at,
@@ -63,9 +59,7 @@ describe('deriveStatus', () => {
         stopped_at: NOW - 5_000,
         last_activity: NOW - 1_000,
       })
-      const events = [
-        makeEvent('SessionEnd', NOW - 5_000, { reason: 'normal' }),
-      ]
+      const events = [makeEvent('SessionEnd', NOW - 5_000, { reason: 'normal' })]
       const result = deriveStatus(session, events, NOW)
       expect(result.derivedStatus).toBe<SessionStatus>('FINISHED')
       expect(result.needsYou).toBe(false)
@@ -158,9 +152,7 @@ describe('deriveStatus', () => {
       const session = makeSession({
         pending_notification_ts: NOW - 1_000,
       })
-      const events = [
-        makeEvent('Notification', NOW - 1_000, { message: longMessage }),
-      ]
+      const events = [makeEvent('Notification', NOW - 1_000, { message: longMessage })]
       const result = deriveStatus(session, events, NOW)
       expect(result.derivedStatus).toBe<SessionStatus>('WAITING_FOR_INPUT')
       expect(result.needsYou).toBe(true)
@@ -193,9 +185,7 @@ describe('deriveStatus', () => {
       const session = makeSession({
         last_activity: NOW - 30_000,
       })
-      const events = [
-        makeEvent('AfterTool', NOW - 30_000, { tool_name: 'Read' }),
-      ]
+      const events = [makeEvent('AfterTool', NOW - 30_000, { tool_name: 'Read' })]
       const result = deriveStatus(session, events, NOW)
       expect(result.derivedStatus).toBe<SessionStatus>('WORKING')
       expect(result.needsYou).toBe(false)
@@ -253,31 +243,21 @@ describe('deriveStatus', () => {
   describe('lastActionLabel derivation per event kind', () => {
     it('maps BeforeTool to "Running <tool_name>"', () => {
       const session = makeSession({ last_activity: NOW - 30_000 })
-      const events = [
-        makeEvent('BeforeTool', NOW - 30_000, { tool_name: 'Bash' }),
-      ]
-      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe(
-        'Running Bash',
-      )
+      const events = [makeEvent('BeforeTool', NOW - 30_000, { tool_name: 'Bash' })]
+      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe('Running Bash')
     })
 
     it('maps AfterTool to "Finished <tool_name>"', () => {
       const session = makeSession({ last_activity: NOW - 30_000 })
-      const events = [
-        makeEvent('AfterTool', NOW - 30_000, { tool_name: 'Edit' }),
-      ]
-      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe(
-        'Finished Edit',
-      )
+      const events = [makeEvent('AfterTool', NOW - 30_000, { tool_name: 'Edit' })]
+      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe('Finished Edit')
     })
 
     it('maps UserPromptSubmit to "Prompt: " + first 50 chars of prompt', () => {
       const session = makeSession({ last_activity: NOW - 30_000 })
       const longPrompt =
         'Please refactor the entire authentication module to use the new JWT helper everywhere'
-      const events = [
-        makeEvent('UserPromptSubmit', NOW - 30_000, { prompt: longPrompt }),
-      ]
+      const events = [makeEvent('UserPromptSubmit', NOW - 30_000, { prompt: longPrompt })]
       const label = deriveStatus(session, events, NOW).lastActionLabel!
       // Label is "Prompt: " + first 50 chars of prompt, then truncated
       // to 60 chars with a U+2026 ellipsis. The raw first-50-chars
@@ -289,9 +269,7 @@ describe('deriveStatus', () => {
     it('maps SessionStart to "Started session"', () => {
       const session = makeSession({ last_activity: NOW - 30_000 })
       const events = [makeEvent('SessionStart', NOW - 30_000)]
-      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe(
-        'Started session',
-      )
+      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe('Started session')
     })
 
     it('maps SessionEnd to "Session ended"', () => {
@@ -300,9 +278,7 @@ describe('deriveStatus', () => {
         last_activity: NOW - 30_000,
       })
       const events = [makeEvent('SessionEnd', NOW - 30_000)]
-      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe(
-        'Session ended',
-      )
+      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe('Session ended')
     })
 
     it('maps Stop to "Idle"', () => {
@@ -314,20 +290,19 @@ describe('deriveStatus', () => {
     it('passes through unknown hook_name verbatim', () => {
       const session = makeSession({ last_activity: NOW - 30_000 })
       const events = [makeEvent('CustomNewHook', NOW - 30_000)]
-      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe(
-        'CustomNewHook',
-      )
+      expect(deriveStatus(session, events, NOW).lastActionLabel).toBe('CustomNewHook')
     })
 
     it('truncates labels longer than 60 chars with single-character ellipsis U+2026', () => {
       const session = makeSession({ last_activity: NOW - 30_000 })
-      const veryLongPrompt =
-        'this is a deliberately overlong user prompt designed to spill well past the sixty character cap of the label string'
-      const events = [
-        makeEvent('UserPromptSubmit', NOW - 30_000, {
-          prompt: veryLongPrompt,
-        }),
-      ]
+      // Trigger truncation via the unknown-hook passthrough branch.
+      // (UserPromptSubmit can't exceed 60 chars because the prompt
+      // body is sliced to 50 first; "Prompt: " + 50 = 58 chars max,
+      // which is the right behavior. Truncation matters for branches
+      // where the label can grow naturally, e.g. unknown hook names
+      // and Notification messages that don't match the regex chain.)
+      const longHookName = 'a'.repeat(100)
+      const events = [makeEvent(longHookName, NOW - 30_000)]
       const label = deriveStatus(session, events, NOW).lastActionLabel!
       expect(label.length).toBe(60)
       expect(label.endsWith('…')).toBe(true)
@@ -336,12 +311,8 @@ describe('deriveStatus', () => {
 
     it('sets lastActionAt to the timestamp of the event used for the label', () => {
       const session = makeSession({ last_activity: NOW - 30_000 })
-      const events = [
-        makeEvent('BeforeTool', NOW - 30_000, { tool_name: 'Read' }),
-      ]
-      expect(deriveStatus(session, events, NOW).lastActionAt).toBe(
-        NOW - 30_000,
-      )
+      const events = [makeEvent('BeforeTool', NOW - 30_000, { tool_name: 'Read' })]
+      expect(deriveStatus(session, events, NOW).lastActionAt).toBe(NOW - 30_000)
     })
 
     it('returns null label and null timestamp when events array is empty', () => {

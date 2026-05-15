@@ -1074,6 +1074,21 @@ export class SqliteAdapter implements EventStore {
     return this.db.prepare(sql).all(...params) as StoredEvent[]
   }
 
+  /**
+   * Newest-first events lookup. Used by the status derivation path
+   * in /sessions/recent and /sessions/:id. Serves "what just
+   * happened in this session" without scanning the full event table:
+   * the compound index idx_events_session_ts (session_id, timestamp)
+   * supports the DESC scan natively, so cost is O(min(limit, rows)).
+   * Sibling of getEventsForSession (ASC, kept untouched for the
+   * filtered-timeline path at routes/sessions.ts:132).
+   */
+  async getRecentEventsForSession(sessionId: string, limit: number): Promise<StoredEvent[]> {
+    return this.db
+      .prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?')
+      .all(sessionId, limit) as StoredEvent[]
+  }
+
   async getEventsForAgent(agentId: string): Promise<StoredEvent[]> {
     return this.db
       .prepare(
