@@ -15,11 +15,16 @@ describe('session routes — agentClasses response shape', () => {
   const mockStore = {
     getRecentSessions: vi.fn(),
     getSessionById: vi.fn(),
+    // Status-derivation path added in 01A-01 PLAN. Default to empty
+    // events so routes still return a valid response when these
+    // tests focus on other response fields.
+    getRecentEventsForSession: vi.fn(),
   }
 
   beforeEach(async () => {
     vi.resetModules()
     Object.values(mockStore).forEach((fn) => fn.mockReset())
+    mockStore.getRecentEventsForSession.mockResolvedValue([])
 
     vi.doMock('../config', () => ({
       config: { logLevel: 'error' },
@@ -254,12 +259,16 @@ describe('session intent — read + write', () => {
     updateSessionIntent: vi.fn(),
     updateSessionSlug: vi.fn(),
     updateSessionProject: vi.fn(),
+    // Status-derivation path added in 01A-01 PLAN. Default to empty
+    // events; these tests assert intent fields, not derived status.
+    getRecentEventsForSession: vi.fn(),
   }
   let lastBroadcast: any[] = []
 
   beforeEach(async () => {
     vi.resetModules()
     Object.values(mockStore).forEach((fn) => fn.mockReset())
+    mockStore.getRecentEventsForSession.mockResolvedValue([])
     lastBroadcast = []
 
     vi.doMock('../config', () => ({ config: { logLevel: 'error' } }))
@@ -393,5 +402,302 @@ describe('session intent — read + write', () => {
     expect(res.status).toBe(200)
     const callArgs = mockStore.updateSessionIntent.mock.calls[0]
     expect(callArgs[1].length).toBe(200)
+  })
+})
+
+// HOME-01 / HOME-02 / HOME-12: derived status + perf budget on the
+// recent-sessions and single-session routes. Adversary mitigations
+// exercised: C1 (DESC scan returns newest events, not oldest),
+// New-H2 (skip per-row derivation when limit > DERIVED_LIMIT_THRESHOLD),
+// Round 3 New-H (lastActivity coerced to started_at when null on wire).
+describe('GET /api/sessions/recent: derived status fields and perf budget', () => {
+  let app: Hono<Env>
+  const mockStore = {
+    getRecentSessions: vi.fn(),
+    getSessionById: vi.fn(),
+    getRecentEventsForSession: vi.fn(),
+  }
+
+  beforeEach(async () => {
+    vi.resetModules()
+    Object.values(mockStore).forEach((fn) => fn.mockReset())
+    vi.doMock('../config', () => ({ config: { logLevel: 'error' } }))
+    const { default: sessionsRouter } = await import('./sessions')
+    app = new Hono<Env>()
+    app.use('*', async (c, next) => {
+      c.set('store', mockStore as unknown as EventStore)
+      c.set('broadcastToSession', () => {})
+      c.set('broadcastToAll', () => {})
+      await next()
+    })
+    app.route('/api', sessionsRouter)
+  })
+
+  test('every row carries the five new derived fields plus the legacy status field', async () => {
+    mockStore.getRecentSessions.mockResolvedValue([
+      {
+        id: 'sess1',
+        project_id: 1,
+        project_name: 'P',
+        project_slug: 'p',
+        slug: null,
+        started_at: 1000,
+        stopped_at: null,
+        last_activity: 1000,
+        pending_notification_ts: null,
+        metadata: null,
+        agent_count: 0,
+        event_count: 0,
+        agent_classes: null,
+      },
+    ])
+    mockStore.getRecentEventsForSession.mockResolvedValue([])
+
+    const res = await app.request('/api/sessions/recent?limit=30')
+    const body = await res.json()
+    const row = body[0]
+    // Legacy two-state status (unchanged).
+    expect(row.status).toBe('active')
+    // Five new HOME-01 fields present.
+    expect(row).toHaveProperty('derivedStatus')
+    expect(row).toHaveProperty('statusDetail')
+    expect(row).toHaveProperty('needsYou')
+    expect(row).toHaveProperty('lastActionLabel')
+    expect(row).toHaveProperty('lastActionAt')
+  })
+
+  test('classifies WAITING_ON_PERMISSION from a real journal Notification string returned newest-first (C1 DESC regression)', async () => {
+    // Mimic a session with >50 events whose newest event is a
+    // permission Notification. The route asks for the newest 50
+    // via getRecentEventsForSession (DESC); we return that newest
+    // slice with the Notification at position 0.
+    mockStore.getRecentSessions.mockResolvedValue([
+      {
+        id: 'sess1',
+        project_id: 1,
+        project_name: 'P',
+        project_slug: 'p',
+        slug: null,
+        started_at: 1000,
+        stopped_at: null,
+        last_activity: 5000,
+        pending_notification_ts: 5000,
+        metadata: null,
+        agent_count: 0,
+        event_count: 0,
+        agent_classes: null,
+      },
+    ])
+    // Newest-first: position 0 is the most recent event.
+    mockStore.getRecentEventsForSession.mockResolvedValue([
+      {
+        id: 999,
+        agent_id: 'a',
+        session_id: 'sess1',
+        hook_name: 'Notification',
+        timestamp: 5000,
+        created_at: 5000,
+        cwd: null,
+        _meta: null,
+        payload: JSON.stringify({ message: 'Claude needs your permission to use Bash' }),
+      },
+    ])
+
+    const res = await app.request('/api/sessions/recent?limit=30')
+    const body = await res.json()
+    expect(body[0].derivedStatus).toBe('WAITING_ON_PERMISSION')
+    expect(body[0].statusDetail).toBe('Bash')
+    expect(body[0].needsYou).toBe(true)
+    expect(body[0].status).toBe('active') // Legacy unchanged.
+  })
+
+  test('skips per-row derivation when limit > 50 (New-H2 mitigation)', async () => {
+    // Seed 6 rows; limit=10000 should trigger the placeholder branch.
+    const rows = Array.from({ length: 6 }, (_, i) => ({
+      id: `sess${i}`,
+      project_id: 1,
+      project_name: 'P',
+      project_slug: 'p',
+      slug: null,
+      started_at: 1000,
+      stopped_at: i === 5 ? 2000 : null,
+      last_activity: 1000,
+      pending_notification_ts: null,
+      metadata: null,
+      agent_count: 0,
+      event_count: 0,
+      agent_classes: null,
+    }))
+    mockStore.getRecentSessions.mockResolvedValue(rows)
+
+    const res = await app.request('/api/sessions/recent?limit=10000')
+    const body = await res.json()
+    expect(body.length).toBe(6)
+    expect(mockStore.getRecentEventsForSession).toHaveBeenCalledTimes(0)
+    // Placeholders: WORKING for active rows, FINISHED for the one
+    // with stopped_at, other fields null/false.
+    expect(body[0].derivedStatus).toBe('WORKING')
+    expect(body[5].derivedStatus).toBe('FINISHED')
+    expect(body[0].statusDetail).toBeNull()
+    expect(body[0].needsYou).toBe(false)
+    expect(body[0].lastActionLabel).toBeNull()
+    expect(body[0].lastActionAt).toBeNull()
+  })
+
+  test('performs full derivation when limit <= 50 (home view path)', async () => {
+    const rows = Array.from({ length: 3 }, (_, i) => ({
+      id: `sess${i}`,
+      project_id: 1,
+      project_name: 'P',
+      project_slug: 'p',
+      slug: null,
+      started_at: 1000,
+      stopped_at: null,
+      last_activity: 1000,
+      pending_notification_ts: null,
+      metadata: null,
+      agent_count: 0,
+      event_count: 0,
+      agent_classes: null,
+    }))
+    mockStore.getRecentSessions.mockResolvedValue(rows)
+    mockStore.getRecentEventsForSession.mockResolvedValue([])
+
+    const res = await app.request('/api/sessions/recent?limit=30')
+    expect(res.status).toBe(200)
+    expect(mockStore.getRecentEventsForSession).toHaveBeenCalledTimes(3)
+    // Each call is bounded at 50 events.
+    for (const call of mockStore.getRecentEventsForSession.mock.calls) {
+      expect(call[1]).toBe(50)
+    }
+  })
+
+  test('wire-coerces null last_activity to started_at (Round 3 New-H mitigation)', async () => {
+    mockStore.getRecentSessions.mockResolvedValue([
+      {
+        id: 'sess1',
+        project_id: 1,
+        project_name: 'P',
+        project_slug: 'p',
+        slug: null,
+        started_at: 1_700_000_000_000,
+        stopped_at: null,
+        last_activity: null, // Just-cleared-events scenario.
+        pending_notification_ts: null,
+        metadata: null,
+        agent_count: 0,
+        event_count: 0,
+        agent_classes: null,
+      },
+    ])
+    mockStore.getRecentEventsForSession.mockResolvedValue([])
+
+    const res = await app.request('/api/sessions/recent?limit=30')
+    const body = await res.json()
+    expect(body[0].lastActivity).toBe(1_700_000_000_000)
+    expect(body[0].lastActivity).not.toBeNull()
+  })
+
+  test('preserves real last_activity when it is set (no spurious coercion)', async () => {
+    mockStore.getRecentSessions.mockResolvedValue([
+      {
+        id: 'sess1',
+        project_id: 1,
+        project_name: 'P',
+        project_slug: 'p',
+        slug: null,
+        started_at: 1_700_000_000_000,
+        stopped_at: null,
+        last_activity: 1_700_001_000_000,
+        pending_notification_ts: null,
+        metadata: null,
+        agent_count: 0,
+        event_count: 0,
+        agent_classes: null,
+      },
+    ])
+    mockStore.getRecentEventsForSession.mockResolvedValue([])
+
+    const res = await app.request('/api/sessions/recent?limit=30')
+    const body = await res.json()
+    expect(body[0].lastActivity).toBe(1_700_001_000_000)
+  })
+})
+
+describe('GET /api/sessions/:id: derived status fields', () => {
+  let app: Hono<Env>
+  const mockStore = {
+    getSessionById: vi.fn(),
+    getRecentEventsForSession: vi.fn(),
+  }
+
+  beforeEach(async () => {
+    vi.resetModules()
+    Object.values(mockStore).forEach((fn) => fn.mockReset())
+    vi.doMock('../config', () => ({ config: { logLevel: 'error' } }))
+    const { default: sessionsRouter } = await import('./sessions')
+    app = new Hono<Env>()
+    app.use('*', async (c, next) => {
+      c.set('store', mockStore as unknown as EventStore)
+      c.set('broadcastToSession', () => {})
+      c.set('broadcastToAll', () => {})
+      await next()
+    })
+    app.route('/api', sessionsRouter)
+  })
+
+  test('single-session response carries the five new derived fields and legacy status', async () => {
+    mockStore.getSessionById.mockResolvedValue({
+      id: 'sess1',
+      project_id: 1,
+      project_name: 'P',
+      project_slug: 'p',
+      slug: null,
+      started_at: 1000,
+      stopped_at: null,
+      last_activity: 1000,
+      pending_notification_ts: null,
+      transcript_path: null,
+      metadata: null,
+      agent_count: 0,
+      event_count: 0,
+      agent_classes: null,
+    })
+    mockStore.getRecentEventsForSession.mockResolvedValue([])
+
+    const res = await app.request('/api/sessions/sess1')
+    const body = await res.json()
+    expect(body.status).toBe('active') // Legacy.
+    expect(body).toHaveProperty('derivedStatus')
+    expect(body).toHaveProperty('statusDetail')
+    expect(body).toHaveProperty('needsYou')
+    expect(body).toHaveProperty('lastActionLabel')
+    expect(body).toHaveProperty('lastActionAt')
+    // Cost is 1 + 1.
+    expect(mockStore.getRecentEventsForSession).toHaveBeenCalledTimes(1)
+  })
+
+  test('single-session response coerces null last_activity to started_at on the wire', async () => {
+    mockStore.getSessionById.mockResolvedValue({
+      id: 'sess1',
+      project_id: 1,
+      project_name: 'P',
+      project_slug: 'p',
+      slug: null,
+      started_at: 1_700_000_000_000,
+      stopped_at: null,
+      last_activity: null,
+      pending_notification_ts: null,
+      transcript_path: null,
+      metadata: null,
+      agent_count: 0,
+      event_count: 0,
+      agent_classes: null,
+    })
+    mockStore.getRecentEventsForSession.mockResolvedValue([])
+
+    const res = await app.request('/api/sessions/sess1')
+    const body = await res.json()
+    expect(body.lastActivity).toBe(1_700_000_000_000)
   })
 })

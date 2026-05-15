@@ -159,6 +159,16 @@ export interface EventStore {
   getSessionsWithPendingNotifications(sinceTs: number): Promise<any[]>
   getAgentsForSession(sessionId: string): Promise<any[]>
   getEventsForSession(sessionId: string, filters?: EventFilters): Promise<StoredEvent[]>
+  /**
+   * Newest-first events lookup, used by the status derivation in
+   * `/sessions/recent` and `/sessions/:id` (HOME-01/02/11/12). Returns
+   * up to `limit` events for the session, ordered DESC by timestamp
+   * via the existing compound index `idx_events_session_ts`. Unlike
+   * `getEventsForSession` (ASC, the wrong end for "what just
+   * happened?"), this helper is bounded and indexed for the per-row
+   * fan-out budget; per-row cost stays O(min(limit, 50)).
+   */
+  getRecentEventsForSession(sessionId: string, limit: number): Promise<StoredEvent[]>
   getEventsForAgent(agentId: string): Promise<StoredEvent[]>
   getEventsSince(sessionId: string, sinceTimestamp: number): Promise<StoredEvent[]>
   deleteSession(sessionId: string): Promise<{ events: number; agents: number }>

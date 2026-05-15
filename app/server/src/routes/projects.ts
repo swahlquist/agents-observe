@@ -86,7 +86,16 @@ router.get('/projects/:id/sessions', async (c) => {
     metadata: r.metadata ? JSON.parse(r.metadata) : null,
     agentCount: r.agent_count,
     eventCount: r.event_count,
-    lastActivity: r.last_activity,
+    // Coerce null last_activity to started_at so this endpoint
+    // emits the same wire shape as /sessions/recent (Round 4 Medium
+    // mitigation; unifies behavior across the two endpoints that
+    // surface session rows). The local client type for this path
+    // (Session.lastActivity: number | null) still permits null, so
+    // no type change is required; the point is wire parity, not
+    // honesty of the existing type. After this edit, a session
+    // whose events were cleared via clearSessionEvents emits the
+    // same value here as it does from /sessions/recent.
+    lastActivity: r.last_activity ?? r.started_at,
     agentClasses:
       typeof r.agent_classes === 'string' && r.agent_classes
         ? r.agent_classes.split(',').filter(Boolean)
