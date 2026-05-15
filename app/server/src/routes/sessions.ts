@@ -49,11 +49,14 @@ const PLACEHOLDER_IDLE_CUTOFF_MS = 30 * 60_000
  * are not authoritative for those four fields, but at least
  * `derivedStatus` is consistent with full derivation.
  */
-function placeholderDerived(row: {
-  stopped_at?: number | null
-  last_activity?: number | null
-  started_at?: number | null
-}, now: number): DerivedStatusFields {
+function placeholderDerived(
+  row: {
+    stopped_at?: number | null
+    last_activity?: number | null
+    started_at?: number | null
+  },
+  now: number,
+): DerivedStatusFields {
   if (row.stopped_at) {
     return {
       derivedStatus: 'FINISHED',
@@ -309,18 +312,19 @@ router.get('/sessions/:id/events', async (c) => {
       ? parseNonNegativeIntQuery(rawOffset, Number.NaN)
       : undefined
 
-  const rows = sinceValue !== null
-    ? await store.getEventsSince(sessionId, sinceValue)
-    : await store.getEventsForSession(sessionId, {
-        agentIds: agentIdParam ? agentIdParam.split(',') : undefined,
-        hookName: c.req.query('hookName') || undefined,
-        search: c.req.query('search') || undefined,
-        // Garbage strings collapse to NaN here; coerce back to undefined
-        // so the storage layer skips the pagination clause entirely
-        // instead of binding NaN.
-        limit: Number.isFinite(limitValue) ? limitValue : undefined,
-        offset: Number.isFinite(offsetValue) ? offsetValue : undefined,
-      })
+  const rows =
+    sinceValue !== null
+      ? await store.getEventsSince(sessionId, sinceValue)
+      : await store.getEventsForSession(sessionId, {
+          agentIds: agentIdParam ? agentIdParam.split(',') : undefined,
+          hookName: c.req.query('hookName') || undefined,
+          search: c.req.query('search') || undefined,
+          // Garbage strings collapse to NaN here; coerce back to undefined
+          // so the storage layer skips the pagination clause entirely
+          // instead of binding NaN.
+          limit: Number.isFinite(limitValue) ? limitValue : undefined,
+          offset: Number.isFinite(offsetValue) ? offsetValue : undefined,
+        })
 
   interface EventRow {
     id: number

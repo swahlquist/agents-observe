@@ -70,9 +70,7 @@ describe('FinishedToday', () => {
 
   it('respects user manual collapse after auto-expand (does not re-fire on the same forceOpen value)', () => {
     const sessions = [buildSession()]
-    const { rerender } = renderWithProviders(
-      <FinishedToday sessions={sessions} forceOpen={true} />,
-    )
+    const { rerender } = renderWithProviders(<FinishedToday sessions={sessions} forceOpen={true} />)
     // Auto-expanded on mount.
     expect(screen.getByText('finished task')).toBeTruthy()
     // User collapses manually.

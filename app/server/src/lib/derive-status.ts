@@ -222,9 +222,7 @@ function eventToLabel(event: EventRow): { label: string; at: number } | null {
  * is bounded at 50 so the sort is free.
  */
 function sortEventsDescByTimestamp(events: EventRow[]): EventRow[] {
-  return events
-    .slice()
-    .sort((a, b) => (b.timestamp ?? -Infinity) - (a.timestamp ?? -Infinity))
+  return events.slice().sort((a, b) => (b.timestamp ?? -Infinity) - (a.timestamp ?? -Infinity))
 }
 
 /**
