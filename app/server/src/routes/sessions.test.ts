@@ -669,6 +669,39 @@ describe('GET /api/sessions/recent: derived status fields and perf budget', () =
     const body = await res.json()
     expect(body[0].lastActivity).toBe(1_700_001_000_000)
   })
+
+  test('WR-05: malformed ?limit=abc falls back to default and does not crash', async () => {
+    // Pre-WR-05: parseInt('abc') returned NaN; the limit > 50 check
+    // was false for NaN so it fell into full derivation, and NaN was
+    // bound into the SQL prepared statement which better-sqlite3
+    // rejects, surfacing as a 500. Now we strict-parse digits-only
+    // and fall back to the default of 20.
+    mockStore.getRecentSessions.mockResolvedValue([])
+
+    const res = await app.request('/api/sessions/recent?limit=abc')
+    expect(res.status).toBe(200)
+    // Default fallback of 20 reached the storage layer.
+    expect(mockStore.getRecentSessions).toHaveBeenCalledWith(20)
+  })
+
+  test('WR-05: malformed ?limit=10abc rejects mixed input and falls back', async () => {
+    mockStore.getRecentSessions.mockResolvedValue([])
+    const res = await app.request('/api/sessions/recent?limit=10abc')
+    expect(res.status).toBe(200)
+    // Strict parse rejects mixed strings (not just 10).
+    expect(mockStore.getRecentSessions).toHaveBeenCalledWith(20)
+  })
+
+  test('WR-05: negative/zero ?limit falls back to default', async () => {
+    mockStore.getRecentSessions.mockResolvedValue([])
+    const res1 = await app.request('/api/sessions/recent?limit=-5')
+    expect(res1.status).toBe(200)
+    expect(mockStore.getRecentSessions).toHaveBeenCalledWith(20)
+    mockStore.getRecentSessions.mockClear()
+    const res2 = await app.request('/api/sessions/recent?limit=0')
+    expect(res2.status).toBe(200)
+    expect(mockStore.getRecentSessions).toHaveBeenCalledWith(20)
+  })
 })
 
 describe('GET /api/sessions/:id: derived status fields', () => {

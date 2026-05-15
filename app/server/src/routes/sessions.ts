@@ -92,6 +92,37 @@ function parseAgentClasses(raw: unknown): string[] {
   return raw.split(',').filter(Boolean)
 }
 
+/**
+ * Parse a positive integer query parameter, falling back to `fallback`
+ * on missing / non-numeric / non-finite / non-positive inputs. WR-05
+ * mitigation: `parseInt('abc')` returns NaN, which better-sqlite3
+ * rejects as a bind value (the error then surfaces as a 500 with a
+ * stack trace). `parseInt('10abc', 10)` parses to 10, which is also
+ * not what the client meant; we reject anything that isn't a clean
+ * non-negative integer string.
+ */
+function parsePositiveIntQuery(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === null || raw === '') return fallback
+  // Strict integer pattern: digits only, no leading +/- (positive only).
+  if (!/^\d+$/.test(raw)) return fallback
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  return parsed
+}
+
+/**
+ * Parse a non-negative integer query parameter (for `offset`, `since`
+ * style values where 0 is meaningful). Same NaN / non-numeric guards
+ * as `parsePositiveIntQuery`.
+ */
+function parseNonNegativeIntQuery(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === null || raw === '') return fallback
+  if (!/^\d+$/.test(raw)) return fallback
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback
+  return parsed
+}
+
 type Env = {
   Variables: {
     store: EventStore
@@ -147,7 +178,9 @@ function rowToRecentSession(r: any, derived: DerivedStatusFields) {
 // GET /sessions/recent
 router.get('/sessions/recent', async (c) => {
   const store = c.get('store')
-  const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) : 20
+  // WR-05: strict positive-int parse with fallback on garbage input
+  // (NaN was reaching better-sqlite3 and surfacing as a 500).
+  const limit = parsePositiveIntQuery(c.req.query('limit'), 20)
   const rows = await store.getRecentSessions(limit)
 
   const now = Date.now()
@@ -174,7 +207,7 @@ router.get('/sessions/recent', async (c) => {
 // immediately throw away.
 router.get('/sessions/unassigned', async (c) => {
   const store = c.get('store')
-  const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) : 100
+  const limit = parsePositiveIntQuery(c.req.query('limit'), 100)
   const rows = await store.getUnassignedSessions(limit)
   // Sidebar reads legacy `status`, not `derivedStatus`. Use
   // placeholders to avoid paying for per-row event lookups here.
@@ -257,14 +290,36 @@ router.get('/sessions/:id/events', async (c) => {
       .filter((f) => OPT_IN_FIELDS.has(f)),
   )
 
-  const rows = sinceParam
-    ? await store.getEventsSince(sessionId, parseInt(sinceParam))
+  // WR-05: strict integer parse with fallback. Pre-fix, malformed
+  // numeric query params (e.g. ?since=abc) hit NaN, which
+  // better-sqlite3 rejects on bind and the error surfaces as a 500.
+  // `since` is a timestamp (non-negative). `limit` is positive.
+  // `offset` is non-negative. Garbage input falls back to the
+  // pre-existing default (undefined for limit/offset means "no
+  // pagination clause"; 0 for since means "everything").
+  const sinceValue = sinceParam !== undefined ? parseNonNegativeIntQuery(sinceParam, 0) : null
+  const rawLimit = c.req.query('limit')
+  const limitValue =
+    rawLimit !== undefined && rawLimit !== ''
+      ? parsePositiveIntQuery(rawLimit, Number.NaN)
+      : undefined
+  const rawOffset = c.req.query('offset')
+  const offsetValue =
+    rawOffset !== undefined && rawOffset !== ''
+      ? parseNonNegativeIntQuery(rawOffset, Number.NaN)
+      : undefined
+
+  const rows = sinceValue !== null
+    ? await store.getEventsSince(sessionId, sinceValue)
     : await store.getEventsForSession(sessionId, {
         agentIds: agentIdParam ? agentIdParam.split(',') : undefined,
         hookName: c.req.query('hookName') || undefined,
         search: c.req.query('search') || undefined,
-        limit: c.req.query('limit') ? parseInt(c.req.query('limit')!) : undefined,
-        offset: c.req.query('offset') ? parseInt(c.req.query('offset')!) : undefined,
+        // Garbage strings collapse to NaN here; coerce back to undefined
+        // so the storage layer skips the pagination clause entirely
+        // instead of binding NaN.
+        limit: Number.isFinite(limitValue) ? limitValue : undefined,
+        offset: Number.isFinite(offsetValue) ? offsetValue : undefined,
       })
 
   interface EventRow {
