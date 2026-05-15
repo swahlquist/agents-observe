@@ -78,12 +78,18 @@ export function categoryIcon(intent: string | null | undefined): LucideIcon {
   return Terminal
 }
 
-interface StatusBadgeDescriptor {
+export interface StatusBadgeDescriptor {
   label: string
   className: string
 }
 
-const STATUS_BADGE: Record<SessionStatus, StatusBadgeDescriptor> = {
+/**
+ * Visual descriptor map keyed by the six-state SessionStatus union.
+ * Exported so the SessionView Overview tab can reuse the same palette
+ * without duplicating the colors (extract to a shared module if a third
+ * consumer arrives).
+ */
+export const STATUS_BADGE: Record<SessionStatus, StatusBadgeDescriptor> = {
   WORKING: {
     label: 'Working',
     className: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300',

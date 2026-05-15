@@ -32,7 +32,7 @@ describe('useTabTitle', () => {
   it('falls back to "needs you" when N=1 and intent is null or empty', () => {
     const { rerender } = renderHook(
       ({ n, intent }: { n: number; intent: string | null }) => useTabTitle(n, intent),
-      { initialProps: { n: 1, intent: null } },
+      { initialProps: { n: 1, intent: null as string | null } },
     )
     expect(document.title).toBe('(1) needs you · agents-observe')
 
@@ -50,7 +50,7 @@ describe('useTabTitle', () => {
   it('updates the title when count or intent changes', () => {
     const { rerender } = renderHook(
       ({ n, intent }: { n: number; intent: string | null }) => useTabTitle(n, intent),
-      { initialProps: { n: 0, intent: null } },
+      { initialProps: { n: 0, intent: null as string | null } },
     )
     expect(document.title).toBe('agents-observe')
     rerender({ n: 1, intent: 'do thing' })
