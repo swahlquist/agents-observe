@@ -149,8 +149,10 @@ function truncateLabel(label: string): string {
 
 /**
  * Build the label + timestamp from a single event row. Returns null
- * if the event payload cannot be parsed (defensive against malformed
- * JSON in storage).
+ * only when the event has no timestamp; malformed JSON payloads fall
+ * back to a hook-name-only label (the catch block sets payload = {}
+ * and walks through the switch as normal). WR-07: previous docstring
+ * said this returned null on bad JSON, which is not what the body did.
  */
 function eventToLabel(event: EventRow): { label: string; at: number } | null {
   const hook = event.hook_name ?? ''
