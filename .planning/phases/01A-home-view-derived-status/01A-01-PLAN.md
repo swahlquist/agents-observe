@@ -14,7 +14,7 @@ autonomous: true
 requirements: [HOME-01, HOME-02, HOME-11, HOME-12, HOME-14, HOME-15]
 must_haves:
   truths:
-    - "GET /sessions/recent returns status, statusDetail, needsYou, lastActionLabel, lastActionAt on every row"
+    - "GET /sessions/recent returns derivedStatus, statusDetail, needsYou, lastActionLabel, lastActionAt on every row, alongside the existing legacy status field (which stays unchanged for the 7+ in-repo consumers still reading it)"
     - "GET /sessions/:id returns the same five derived fields"
     - "Status correctly classifies all six states (WORKING, WAITING_FOR_INPUT, WAITING_ON_PERMISSION, IDLE, FINISHED, ABANDONED) using real captured journal Notification messages"
     - "Server end-to-end response time stays under 50 ms for 30 sessions on the typical local SQLite database"
@@ -38,7 +38,7 @@ must_haves:
 **As a** founder running 4 to 5 parallel agent sessions, **I want to** see at a glance which sessions need me, what each is doing right now, and which are finished, **so that** I can route my attention without reading event logs.
 
 <objective>
-Add server-side derivation of the five new fields (`status`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`) to both `GET /sessions/recent` and `GET /sessions/:id`. The client redesign in Plan 02 consumes these fields. No schema migration. All fields computed at query time from existing `sessions` and `events` rows.
+Add server-side derivation of five new fields (`derivedStatus`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`) to both `GET /sessions/recent` and `GET /sessions/:id`. The legacy `status: 'active' | 'ended'` field on the response stays untouched: 7+ in-repo consumers (sidebar Unassigned bucket, settings tabs, modals, labels, session-list.tsx kept alive per CONTEXT.md § "Things to leave alone") still read it via `session.status === 'active'` and would break under a type narrowing. Phase 1b will migrate those consumers and remove the legacy field. The client redesign in Plan 02 consumes the five new fields. No schema migration. All fields computed at query time from existing `sessions` and `events` rows.
 
 Purpose: Unblock Plan 02 (client) by shipping the wire contract first. Every Phase 1a UI behavior depends on these fields.
 Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test file, and wiring changes inside `app/server/src/routes/sessions.ts` that route both endpoints through the helper.
@@ -73,7 +73,7 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
     - app/server/package.json (confirm vitest is the runner, no extra config needed)
   </read_first>
   <behavior>
-    - Test file describes `deriveStatus(session, events, now)` and asserts one passing case per status state.
+    - Test file describes `deriveStatus(session, events, now)` and asserts one passing case per status state. (Field naming note: the function returns a `DerivedStatusFields` object whose six-state classification sits under the key `derivedStatus`, NOT `status`. The legacy two-state field `status: 'active' | 'ended'` is computed separately by the existing `deriveSessionStatus(stoppedAt)` helper and is NOT produced by `deriveStatus`. Test fixtures assert against `result.derivedStatus`, not `result.status`.)
     - FINISHED: session with `stopped_at` set, regardless of activity recency, returns status FINISHED, needsYou false, statusDetail null, lastActionLabel reflects most recent event (typically "Session ended" for a SessionEnd terminal event).
     - WAITING_ON_PERMISSION: session has `pending_notification_ts` set, most recent Notification event payload message is the real string "Claude needs your permission to use Bash" (from PROJECT.md line 80). Returns status WAITING_ON_PERMISSION, needsYou true, statusDetail "Bash" (parsed tool name), lastActionLabel "Waiting on Bash permission".
     - WAITING_FOR_INPUT (attention variant): session has `pending_notification_ts` set, most recent Notification message is the real string "Claude Code needs your attention" (from PROJECT.md line 80). Returns status WAITING_FOR_INPUT, needsYou true, statusDetail null, lastActionLabel "Waiting for input".
@@ -135,7 +135,7 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
     - The status branches follow CONTEXT.md § "Status derivation rules" exactly: FINISHED when `stopped_at` is non-null; WAITING_ON_PERMISSION / WAITING_FOR_INPUT when `pending_notification_ts` is non-null (text-parsed); WORKING / IDLE / ABANDONED otherwise based on `last_activity` distance from `now` (60-second WORKING window, 30-minute ABANDONED cutoff).
     - The text parser uses the three-regex chain from CONTEXT.md § "Notification text parsing", applied in the order listed, against the most recent Notification event's `payload.message` field.
     - The `lastActionLabel` derivation walks the last 5 events backward (per CONTEXT.md § "lastActionLabel derivation"), first match wins, and truncates with single-character ellipsis (U+2026) at 60 characters.
-    - `rowToRecentSession` becomes async (or accepts a precomputed `derived` argument) and is invoked from a small helper that does the per-row event lookup. Update both `GET /sessions/recent` and `GET /sessions/:id` to perform: 1 query for rows, then for each row a `store.getRecentEventsForSession(row.id, 50)` call (the NEW helper added in Task 2; returns the newest 50 events via `ORDER BY timestamp DESC LIMIT ?`, not the oldest 50), then `deriveStatus(row, events, Date.now())`, then merge the five new fields onto the response body. The existing `status` field (currently `"active" | "ended"` from `deriveSessionStatus(stoppedAt)`) is preserved by repurposing it: keep returning the same legacy string for clients that read it today, but additionally surface the new derived status under the same `status` key. Resolution: rename the legacy field on the wire is out of scope; CONTEXT.md and REQUIREMENTS.md both expect `status` to be the derived six-state value. Replace the legacy two-state `status` with the new six-state value, since the only consumers in this repo are the home-page and session list which Plan 02 rewrites.
+    - `rowToRecentSession` becomes async (or accepts a precomputed `derived` argument) and is invoked from a small helper that does the per-row event lookup. Update both `GET /sessions/recent` and `GET /sessions/:id` to perform: 1 query for rows, then for each row a `store.getRecentEventsForSession(row.id, 50)` call (the NEW helper added in Task 2; returns the newest 50 events via `ORDER BY timestamp DESC LIMIT ?`, not the oldest 50), then `deriveStatus(row, events, Date.now())`, then merge the five new fields onto the response body. Field-naming resolution (per adversary H1): the legacy `status: 'active' | 'ended'` field stays on the wire AS-IS, populated by the existing `deriveSessionStatus(stoppedAt)` helper. The new six-state classification is exposed under a NEW key, `derivedStatus`, alongside `statusDetail`, `needsYou`, `lastActionLabel`, and `lastActionAt`. The adversary review identified 7+ in-repo consumers (sidebar Unassigned bucket, settings tabs, modals, labels, session-list.tsx kept alive per CONTEXT.md § "Things to leave alone") that compare `session.status === 'active'` and would break under a type narrowing; rewriting them is out of Phase 1a scope. Phase 1b will migrate consumers and remove the legacy field.
     - For `GET /sessions/:id`, also include the new fields on the response (HOME-01 requires both endpoints).
   </behavior>
   <action>
@@ -143,7 +143,7 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
 
     Exported type `SessionStatus` as the union of the six string literals from CONTEXT.md § carry_forward (`WORKING`, `WAITING_FOR_INPUT`, `WAITING_ON_PERMISSION`, `IDLE`, `FINISHED`, `ABANDONED`).
 
-    Exported interface `DerivedStatusFields` with the five fields (`status: SessionStatus`, `statusDetail: string | null`, `needsYou: boolean`, `lastActionLabel: string | null`, `lastActionAt: number | null`).
+    Exported interface `DerivedStatusFields` with the five fields (`derivedStatus: SessionStatus`, `statusDetail: string | null`, `needsYou: boolean`, `lastActionLabel: string | null`, `lastActionAt: number | null`). The field name is `derivedStatus` (NOT `status`); the legacy `status: 'active' | 'ended'` field stays on the wire separately, populated by the existing `deriveSessionStatus(stoppedAt)` helper.
 
     Exported function `deriveStatus(session, events, now)`. `session` is typed loosely (a structural type covering `stopped_at`, `last_activity`, `pending_notification_ts`). `events` is typed loosely (structural cover for `hook_name`, `timestamp`, `payload`). `now` is a number (Unix ms).
 
@@ -157,7 +157,7 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
 
     Do NOT modify the existing `getEventsForSession` method or its ASC ordering: the filtered timeline view at `routes/sessions.ts:132` depends on ASC plus pagination semantics. The new helper is additive.
 
-    Edit `app/server/src/routes/sessions.ts`. Delete the existing `deriveSessionStatus` function at line 7 (no other call sites remain after this change; confirm with grep). Import `deriveStatus` and `DerivedStatusFields` from `../lib/derive-status`. Convert the two route handlers (`GET /sessions/recent` and `GET /sessions/:id`) so each row's events are fetched via `await store.getRecentEventsForSession(row.id, 50)` and then `deriveStatus(row, events, Date.now())` produces the new fields, which are spread into the response object alongside the existing fields. The `rowToRecentSession` mapper takes a second argument: the derived block. Maintain field ordering: existing fields first, new fields last.
+    Edit `app/server/src/routes/sessions.ts`. KEEP the existing `deriveSessionStatus` function at line 7 untouched; it continues to populate the legacy `status: 'active' | 'ended'` field on the response (H1 mitigation: 7+ in-repo consumers still read this field). Import `deriveStatus` and `DerivedStatusFields` from `../lib/derive-status`. Convert the two route handlers (`GET /sessions/recent` and `GET /sessions/:id`) so each row's events are fetched via `await store.getRecentEventsForSession(row.id, 50)` and then `deriveStatus(row, events, Date.now())` produces the FIVE new fields (`derivedStatus`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`), which are spread into the response object alongside the existing legacy fields (including legacy `status`). The `rowToRecentSession` mapper takes a second argument: the derived block. Maintain field ordering: existing fields first (including legacy `status`), new fields last.
 
     For `GET /sessions/recent`, fetch events for all `rows` in a single loop (the SELECT in `getRecentSessions` already returns N <= 30, so this is N event-table lookups, each capped at 50 rows by the compound index `idx_events_session_ts (session_id, timestamp)`, which serves `ORDER BY timestamp DESC LIMIT 50` via reverse scan). Do not introduce a JOIN or a fan-out query rewrite; keep the existing SELECT untouched per CONTEXT.md § "Performance plan".
 
@@ -174,8 +174,8 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
     - Source: `app/server/src/storage/sqlite-adapter.ts` `getEventsForSession` is untouched (still `ORDER BY timestamp ASC`); confirm via `git diff` that no lines inside the existing method body changed.
     - Source: `app/server/src/routes/sessions.ts` imports `deriveStatus` from `../lib/derive-status` and the obsolete `deriveSessionStatus` helper at the top of the file is removed. Both route handlers call `store.getRecentEventsForSession(row.id, 50)` (NOT `getEventsForSession`); confirm via `grep -n "getRecentEventsForSession\|getEventsForSession" app/server/src/routes/sessions.ts` (expect 2 matches for the new helper and 1 unchanged match at line 132 for the existing filtered-timeline call).
     - Test command (from `app/server`): `npm test` exits 0; the file `derive-status.test.ts` from Task 1 now passes.
-    - Behavior: a manual curl against `/api/sessions/recent` after the server restarts returns rows where every row has the keys `status`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`. (Manual sanity check; the test suite covers correctness.)
-    - Behavior: for a session with more than 50 events whose most recent event is a permission Notification, the returned `status` is `WAITING_ON_PERMISSION` and `lastActionLabel` reflects the most recent event (not the oldest event in the table). This is the regression check for C1: confirm a real DESC scan, not an ASC scan with the wrong end.
+    - Behavior: a manual curl against `/api/sessions/recent` after the server restarts returns rows where every row has the keys `status` (legacy two-state, unchanged from main), `derivedStatus` (new six-state), `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`. (Manual sanity check; the test suite covers correctness.)
+    - Behavior: for a session with more than 50 events whose most recent event is a permission Notification, the returned `derivedStatus` is `WAITING_ON_PERMISSION` and `lastActionLabel` reflects the most recent event (not the oldest event in the table). This is the regression check for C1: confirm a real DESC scan, not an ASC scan with the wrong end. Legacy `status` for the same session is `'active'` (unchanged behavior).
     - Perf budget: derivation does not introduce any query beyond `1 + N` with N <= 30 and `LIMIT 50` per event lookup. Reviewer can `grep -n "getRecentEventsForSession\|store\\." app/server/src/routes/sessions.ts` and confirm no scan-style queries appear in either route handler.
     - No em dashes (U+2014) or double-hyphen ("--") runs in any string literal in `derive-status.ts` or in the new code added to `sessions.ts`.
   </acceptance_criteria>
@@ -202,7 +202,7 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
 | T-01A-01-02 | D | Regex chain over attacker-controlled Notification message text | accept | Hooks are local; an external attacker has no path to drive Notification text. Regex set is bounded (3 patterns, anchored on short prefixes, no catastrophic backtracking patterns). |
 | T-01A-01-03 | I | `lastActionLabel` could surface a long user prompt slice | mitigate | Truncate to 60 characters with single-character ellipsis per CONTEXT.md § "lastActionLabel derivation". |
 | T-01A-01-04 | D | Per-row `getRecentEventsForSession` fan-out on `/sessions/recent` | mitigate | N is bounded to 30 by the SELECT in `getRecentSessions`; each lookup is `LIMIT 50` and indexed by `idx_events_session_ts (session_id, timestamp)`, which serves the `ORDER BY timestamp DESC LIMIT 50` plan via reverse scan. Confirmed budget in CONTEXT.md § "Performance plan". |
-| T-01A-01-05 | T | Storage layer rewriting the legacy `status` field shape | accept | The only in-repo consumers (sidebar, home page) are rewritten in Plan 02 to consume the new six-state value. External consumers (none in this milestone) are not in scope. |
+| T-01A-01-05 | T | Legacy `status` field and new `derivedStatus` field drift out of sync on the wire | accept | Both fields are computed at request time from the same `sessions` row (`stopped_at` drives legacy via `deriveSessionStatus`; `stopped_at` plus events drives derived via `deriveStatus`), so they cannot diverge for the same response. The two fields can show conceptual disagreement (e.g. legacy `'active'` while derived is `'ABANDONED'`); this is by design (legacy = "process is not stopped"; derived = "process is stopped or stale"). Phase 1b migration removes the legacy field entirely, eliminating the drift class. |
 </threat_model>
 
 <verification>
@@ -214,8 +214,8 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
 </verification>
 
 <success_criteria>
-1. Every row from `GET /sessions/recent` carries `status`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`. (HOME-01)
-2. `GET /sessions/:id` carries the same five derived fields. (HOME-01)
+1. Every row from `GET /sessions/recent` carries the legacy `status` field unchanged, plus the five new derived fields `derivedStatus`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`. (HOME-01)
+2. `GET /sessions/:id` carries the same five derived fields plus the legacy `status` field. (HOME-01)
 3. All six status states are exercised by at least one passing test that uses a real captured journal Notification string for the WAITING branches. (HOME-02)
 4. Recency thresholds match CONTEXT.md (60 second WORKING window, 30 minute ABANDONED cutoff). (HOME-11)
 5. Derivation cost stays `1 + N` queries with `N <= 30` and `LIMIT 50` per event lookup; no full event-table scan. (HOME-12)
