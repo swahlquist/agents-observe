@@ -87,12 +87,25 @@ describe('SessionCard', () => {
     expect(screen.getByText('my-slug')).toBeInTheDocument()
   })
 
-  it('routes click to setSelectedProject + setSelectedSessionId via UI store', () => {
-    // We just verify the button is keyboard-focusable and clickable.
-    const session = buildSession()
+  it('routes click to selectProjectSession via UI store (WR-06 atomic update)', async () => {
+    // WR-06: pre-fix used setSelectedProject + setTimeout(..., 0) +
+    // setSelectedSessionId. Post-fix the card calls selectProjectSession
+    // in one go so the project and session land in the same commit.
+    const { useUIStore } = await import('@/stores/ui-store')
+    const { fireEvent } = await import('@testing-library/react')
+    const session = buildSession({
+      id: 'sess-click-target',
+      projectId: 42,
+      projectSlug: 'click-project',
+    })
     renderWithProviders(<SessionCard session={session} />)
     const card = screen.getByRole('button')
-    expect(card).toBeInTheDocument()
+    fireEvent.click(card)
+    // Both fields update synchronously now (no microtask race).
+    const s = useUIStore.getState()
+    expect(s.selectedProjectId).toBe(42)
+    expect(s.selectedProjectSlug).toBe('click-project')
+    expect(s.selectedSessionId).toBe('sess-click-target')
   })
 })
 

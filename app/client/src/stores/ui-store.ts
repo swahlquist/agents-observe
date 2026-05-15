@@ -64,6 +64,20 @@ interface UIState {
   selectedAgentIds: string[]
   setSelectedProject: (id: number | null, slug?: string | null) => void
   setSelectedSessionId: (id: string | null) => void
+  /**
+   * Select a project AND a session in one atomic `set()` call. Use this
+   * when you need to navigate from a generic context (e.g. a home-view
+   * session card or the overlap banner) to a specific session inside a
+   * specific project. Avoids the `setSelectedProject(...);
+   * setTimeout(() => setSelectedSessionId(...), 0)` microtask trick
+   * that relied on store-set ordering (WR-06). Filter state for the
+   * incoming session is restored from sessionFilterStates if present.
+   */
+  selectProjectSession: (
+    projectId: number | null,
+    projectSlug: string | null,
+    sessionId: string | null,
+  ) => void
   updateProjectSlug: (slug: string) => void
   setSelectedAgentIds: (ids: string[]) => void
   toggleAgentId: (id: string) => void
@@ -350,6 +364,58 @@ export const useUIStore = create<UIState>((set, get) => ({
       }),
     })
     updateHash(state.selectedProjectSlug, id)
+  },
+  selectProjectSession: (projectId, projectSlug, sessionId) => {
+    // Single set() call so the project and session land in the same
+    // React commit. Pre-WR-06 callers ran setSelectedProject() then
+    // setTimeout(() => setSelectedSessionId(...), 0) because
+    // setSelectedProject's body explicitly writes
+    // `selectedSessionId: null`; the microtask deferred the second
+    // setter past that clear. That relied on store ordering and was
+    // one tiny refactor (zustand middleware, batching) away from a
+    // silent regression.
+    const state = get()
+    const nextFilterStates = new Map(state.sessionFilterStates)
+
+    // Save the current session's filter state before switching.
+    if (state.selectedSessionId) {
+      nextFilterStates.set(state.selectedSessionId, {
+        activeStaticFilters: state.activeStaticFilters,
+        activeToolFilters: state.activeToolFilters,
+        searchQuery: state.searchQuery,
+      })
+    }
+
+    // Restore filter state for the incoming session (or defaults).
+    const restored = sessionId
+      ? (nextFilterStates.get(sessionId) ?? DEFAULT_FILTER_STATE)
+      : DEFAULT_FILTER_STATE
+
+    // Auto-exit rewind mode if switching to a different session, same
+    // logic as setSelectedSessionId.
+    const exitingRewind = state.rewindMode && state.selectedSessionId !== sessionId
+
+    const newSlug = projectSlug ?? null
+    set({
+      selectedProjectId: projectId,
+      selectedProjectSlug: newSlug,
+      selectedSessionId: sessionId,
+      selectedAgentIds: [],
+      expandedEventIds: new Set(),
+      lastExpandedEventId: null,
+      selectedEventId: null,
+      scrollToEventId: null,
+      sessionFilterStates: nextFilterStates,
+      activeStaticFilters: restored.activeStaticFilters,
+      activeToolFilters: restored.activeToolFilters,
+      searchQuery: restored.searchQuery,
+      ...(exitingRewind && {
+        rewindMode: false,
+        frozenEvents: null,
+        autoFollow: state.autoFollowBeforeRewind,
+      }),
+    })
+    updateHash(newSlug, sessionId)
   },
   updateProjectSlug: (slug) => {
     set({ selectedProjectSlug: slug })

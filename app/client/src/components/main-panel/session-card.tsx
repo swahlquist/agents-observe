@@ -176,8 +176,7 @@ export interface SessionCardProps {
 }
 
 export function SessionCard({ session, hideClientBadge = false }: SessionCardProps) {
-  const setSelectedProject = useUIStore((s) => s.setSelectedProject)
-  const setSelectedSessionId = useUIStore((s) => s.setSelectedSessionId)
+  const selectProjectSession = useUIStore((s) => s.selectProjectSession)
   const pulseActive = useSessionPulseActive(session.id)
 
   const stripeClass = STRIPE_COLORS[colorStripeIndex(session.id)]
@@ -187,10 +186,10 @@ export function SessionCard({ session, hideClientBadge = false }: SessionCardPro
   const client = hideClientBadge ? null : clientBadgeText(session.agentClasses)
 
   const handleClick = () => {
-    setSelectedProject(session.projectId, session.projectSlug ?? null)
-    // Match the SessionList pattern: route through a microtask so the
-    // project-id setter has flushed before the session-id arrives.
-    setTimeout(() => setSelectedSessionId(session.id), 0)
+    // WR-06: one atomic ui-store update for project + session so we do
+    // not depend on a `setTimeout(..., 0)` to sneak the session-id
+    // setter past setSelectedProject's `selectedSessionId: null` clear.
+    selectProjectSession(session.projectId, session.projectSlug ?? null, session.id)
   }
 
   const intentTitle = session.intent || session.slug || session.id.slice(0, 8)
