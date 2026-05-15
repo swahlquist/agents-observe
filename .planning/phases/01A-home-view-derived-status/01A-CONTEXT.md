@@ -61,6 +61,8 @@ Locked in PROJECT.md and REQUIREMENTS.md (do not re-decide):
 | `IDLE` | `pending_notification_ts IS NULL` AND `last_activity` between `now - 30min` and `now - 60s` |
 | `ABANDONED` | `pending_notification_ts IS NULL` AND `last_activity < now - 30min` AND not finished |
 
+**NULL handling for `last_activity`:** the column is `NULL` for very new sessions (rows inserted before any event arrives) and for sessions whose events were cleared via `clearSessionEvents` (the storage layer explicitly sets `last_activity = NULL`). For the recency cascade above (WORKING / IDLE / ABANDONED), substitute `started_at` whenever `last_activity IS NULL`. If both are NULL (truly degenerate; should not occur in practice), default to `WORKING`. Without this fallback, JavaScript's `now - null` coerces to `now` and pushes the session straight into `ABANDONED`, which is wrong for a brand-new or just-cleared session.
+
 `needsYou` = status in (`WAITING_FOR_INPUT`, `WAITING_ON_PERMISSION`).
 
 **Why these thresholds:**
@@ -77,7 +79,8 @@ Single regex chain, applied in order, against the message field of the most rece
 1. `/needs your permission to use ([A-Za-z]+)/i` → `WAITING_ON_PERMISSION`, `statusDetail = match[1]` (the tool name)
 2. `/needs your attention/i` → `WAITING_FOR_INPUT`, `statusDetail = null`
 3. `/waiting for your input/i` → `WAITING_FOR_INPUT`, `statusDetail = null`
-4. fallback → `WAITING_FOR_INPUT`, `statusDetail = message slice 0..40`
+4. fallback (message present but unrecognized) → `WAITING_FOR_INPUT`, `statusDetail = message slice 0..40`
+5. fallback (`pending_notification_ts IS NOT NULL` but NO Notification event found in the fetched 50-event window) → `WAITING_FOR_INPUT`, `statusDetail = null`, `lastActionLabel = "Waiting for input"`. The Notification that triggered the flag could be older than 50 events back; the server flag is canonical (it's set on every transition), so trust it and default to the input branch when text isn't available.
 
 Tests must use real captured journal strings, not invented ones.
 

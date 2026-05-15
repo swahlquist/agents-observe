@@ -9,9 +9,9 @@ Requirements for the v1 redesign, split across Phase 1a (UI + derived status) an
 
 ### Home View — Status Derivation (Phase 1a)
 
-- [ ] **HOME-01**: Server returns `status`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt` on every session payload (`GET /sessions/recent` and `GET /sessions/:id`), derived at query time with no schema change.
+- [ ] **HOME-01**: Server returns `derivedStatus`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt` on every session payload (`GET /sessions/recent` and `GET /sessions/:id`), derived at query time with no schema change. The legacy `status: 'active' | 'ended'` field on the same payload stays unchanged for backwards compatibility with the 7+ in-repo consumers that still read it; Phase 1b migrates those and removes the legacy field.
 - [ ] **HOME-02**: Status derivation correctly classifies real Notification messages from the journal: messages containing "permission" map to `WAITING_ON_PERMISSION` with the parsed tool name in `statusDetail`; other notifications map to `WAITING_FOR_INPUT` with the message as `statusDetail`. Both set `needsYou=true`.
-- [ ] **HOME-11**: Status derivation classifies by recency: `< 30s` since `last_activity` is `WORKING`; `30s` to `30m` is `IDLE`; `>= 4h` with `status='stopped'` is `FINISHED`; `>= 4h` with `status='active'` is `ABANDONED`.
+- [ ] **HOME-11**: Status derivation classifies sessions in this priority order: (1) `FINISHED` when `stopped_at IS NOT NULL`, regardless of recency; (2) `WAITING_ON_PERMISSION` or `WAITING_FOR_INPUT` when `pending_notification_ts IS NOT NULL` (sub-state derived from the most recent Notification event's message text per HOME-02); (3) recency cascade against `last_activity` versus now: `< 60s` is `WORKING`, `60s` to `30m` is `IDLE`, `> 30m` is `ABANDONED`. The 30min IDLE-to-ABANDONED cutoff matches the existing overlap-detection window so there is one tuning knob. When `last_activity IS NULL` (legitimate for very new sessions and after `clearSessionEvents`), the recency cascade substitutes `started_at`; if both are NULL (degenerate), default to `WORKING`.
 - [ ] **HOME-12**: Derivation is O(N) over sessions and O(M) over the last 50 events per session. No full event-table scan on a `/sessions/recent` call.
 
 ### Home View — Layout and Sections (Phase 1a)
