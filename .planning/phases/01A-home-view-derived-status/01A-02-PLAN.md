@@ -8,6 +8,7 @@ files_modified:
   - app/client/src/components/main-panel/needs-you-pile.tsx
   - app/client/src/components/main-panel/project-group.tsx
   - app/client/src/components/main-panel/session-card.tsx
+  - app/client/src/components/main-panel/session-card.test.tsx
   - app/client/src/components/main-panel/finished-today.tsx
   - app/client/src/components/main-panel/home-page.tsx
   - app/client/src/components/main-panel/main-panel.tsx
@@ -91,10 +92,11 @@ Output: Four new presentational components, two new side-effect hooks, a new `be
   <name>Task 1: Build the four card components (NeedsYouPile, ProjectGroup, SessionCard, FinishedToday)</name>
   <files>
     - app/client/src/components/main-panel/session-card.tsx (new)
+    - app/client/src/components/main-panel/session-card.test.tsx (new; covers IDLE elapsed-time fallback per adversary New-H3)
     - app/client/src/components/main-panel/needs-you-pile.tsx (new)
     - app/client/src/components/main-panel/project-group.tsx (new)
     - app/client/src/components/main-panel/finished-today.tsx (new)
-    - app/client/src/types/index.ts (extend RecentSession only)
+    - app/client/src/types/index.ts (extend RecentSession: add five new derived fields, widen lastActivity to number | null)
   </files>
   <read_first>
     - app/client/src/types/index.ts lines 85 to 125 (current `RecentSession` interface; five new optional fields are added here, not split into a new type)
@@ -111,7 +113,7 @@ Output: Four new presentational components, two new side-effect hooks, a new `be
     - SessionCard renders for one session and shows, left to right: a 3-pixel vertical color stripe; a category icon (24x24); a primary intent line (title); a secondary line with status badge + lastActionLabel + relative time; a client badge ("claude" or "gemini") at the trailing edge. The whole card is keyboard-focusable and click-routable to SessionView, mirroring the existing `SessionList` row click handler.
     - Color stripe palette has exactly 8 colors per CONTEXT.md § "Card visuals". Index = `hash(session_id) % 8`. Use a deterministic 32-bit hash (e.g. FNV-1a or `cyrb53` style; do not use `Math.random()`).
     - Category icon: client-derived from intent text via the keyword map in CONTEXT.md § "Card visuals" (case-insensitive). Fallback is `Terminal`.
-    - Status badge palette: WORKING green, WAITING_FOR_INPUT amber, WAITING_ON_PERMISSION red, IDLE muted gray, FINISHED blue, ABANDONED dim gray with slight transparency. Per CONTEXT.md § "Card visuals". For WAITING_ON_PERMISSION, append the tool name from `statusDetail` to the badge label (e.g. "Waiting on Bash"). For IDLE, append elapsed time (e.g. "Idle 15m") per HOME-13.
+    - Status badge palette: WORKING green, WAITING_FOR_INPUT amber, WAITING_ON_PERMISSION red, IDLE muted gray, FINISHED blue, ABANDONED dim gray with slight transparency. Per CONTEXT.md § "Card visuals". For WAITING_ON_PERMISSION, append the tool name from `statusDetail` to the badge label (e.g. "Waiting on Bash"). For IDLE, append elapsed time (e.g. "Idle 15m") per HOME-13 computed as `Date.now() - (session.lastActivity ?? session.startedAt)`. The fallback to `startedAt` mirrors the server-side H3 NULL-handling rule in CONTEXT.md § "Status derivation rules": `lastActivity` can be `null` after `clearSessionEvents` or for brand-new sessions, and a raw `Date.now() - null` would render "Idle NaNm".
     - Client badge shows "claude" or "gemini" derived from `agentClasses[0]`. Hide the badge entirely when there is only one unique client class across all sessions in the home view (single-client mode per CONTEXT.md § "Card visuals"). The home page passes a `hideClientBadge` boolean prop down through ProjectGroup / NeedsYouPile / FinishedToday.
     - NeedsYouPile receives `sessions: RecentSession[]` where every entry has `needsYou === true`. Sort by `lastActionAt` descending (most recent first). If empty, render the collapsed one-line subtle row "All clear. Nothing needs you." per CONTEXT.md § "Empty states" and § "Sections and ordering".
     - ProjectGroup receives one project's `{ projectId, projectName, activeSessions, finishedTodaySessions }`. Header shows project name + active count + finished-today count. Expanded by default in Phase 1a (no persistence; explicitly deferred per CONTEXT.md § "Sections and ordering"). Caret toggles expand/collapse via local component state.
@@ -133,13 +135,14 @@ Output: Four new presentational components, two new side-effect hooks, a new `be
 
     Create `finished-today.tsx`. Accepts `{ sessions, hideClientBadge, forceOpen }` where `forceOpen` is computed by the parent (the "all sessions finished today, none active" case). Local state defaults to `forceOpen`. Collapsed shows just the count header. Expanded shows the list.
 
-    Edit `app/client/src/types/index.ts`. Locate the `RecentSession` interface (lines 98 to 125 in current main). KEEP the existing `status: string` field unchanged (legacy 2-state `'active' | 'ended'`; 7+ existing consumers still read it). ADD a NEW field `derivedStatus: 'WORKING' | 'WAITING_FOR_INPUT' | 'WAITING_ON_PERMISSION' | 'IDLE' | 'FINISHED' | 'ABANDONED'`. Add `statusDetail: string | null`, `needsYou: boolean`, `lastActionLabel: string | null`, `lastActionAt: number | null` as required (non-optional) fields. Plan 01 guarantees every wire response carries them. Do not split into a new type; CONTEXT.md § "Reusable assets" requires the same hook to continue serving the payload. The legacy `status` field is left alive as the H1 mitigation; rewriting the 7+ consumer call sites is deferred to Phase 1b cleanup.
+    Edit `app/client/src/types/index.ts`. Locate the `RecentSession` interface (lines 98 to 125 in current main). KEEP the existing `status: string` field unchanged (legacy 2-state `'active' | 'ended'`; 7+ existing consumers still read it). WIDEN the existing `lastActivity: number` (line 117) to `lastActivity: number | null`. Rationale: the column can legitimately be `null` after `clearSessionEvents` or for brand-new sessions per CONTEXT.md § "Status derivation rules" NULL-handling note; the prior non-nullable type was a lie inherited from the legacy schema (the sibling `Session` interface at line 43 already types it correctly as `number | null`). ADD a NEW field `derivedStatus: 'WORKING' | 'WAITING_FOR_INPUT' | 'WAITING_ON_PERMISSION' | 'IDLE' | 'FINISHED' | 'ABANDONED'`. Add `statusDetail: string | null`, `needsYou: boolean`, `lastActionLabel: string | null`, `lastActionAt: number | null` as required (non-optional) fields. Plan 01 guarantees every wire response carries them. Do not split into a new type; CONTEXT.md § "Reusable assets" requires the same hook to continue serving the payload. The legacy `status` field is left alive as the H1 mitigation; rewriting the 7+ consumer call sites is deferred to Phase 1b cleanup. Existing call sites that read `session.lastActivity` directly (verifiable via grep) need to handle the new `null` case; the IDLE badge in session-card.tsx is the immediate consumer and uses the `(lastActivity ?? startedAt)` fallback per the behavior block.
 
     No em dashes (U+2014) or double-hyphen ("--") runs anywhere in card content, badge labels, empty-state strings, or comments that will ship to users (per CLAUDE.md hard rule).
   </action>
   <acceptance_criteria>
     - Files exist: `session-card.tsx`, `needs-you-pile.tsx`, `project-group.tsx`, `finished-today.tsx` under `app/client/src/components/main-panel/`.
-    - `RecentSession` in `app/client/src/types/index.ts` carries the five new fields (`derivedStatus` six-state union, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`) as required (non-optional), AND the legacy `status: string` field remains present and unchanged. Confirm via `grep -nE "^\s*(status|derivedStatus):" app/client/src/types/index.ts`. Both lines must appear.
+    - `RecentSession` in `app/client/src/types/index.ts` carries the five new fields (`derivedStatus` six-state union, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`) as required (non-optional), AND the legacy `status: string` field remains present and unchanged, AND the `lastActivity` field is widened from `number` to `number | null` per the H3 NULL-handling rule. Confirm via `grep -nE "^\s*(status|derivedStatus|lastActivity):" app/client/src/types/index.ts`. All three lines must appear; the `lastActivity` line must end in `number | null`.
+    - SessionCard renders the IDLE badge with the correct elapsed-time fallback chain. Add a Vitest unit test in a new `app/client/src/components/main-panel/session-card.test.tsx`: given a session fixture with `derivedStatus: 'IDLE'`, `lastActivity: null`, `startedAt: Date.now() - 15 * 60 * 1000`, the badge text contains "15m" (or rounded equivalent), NOT "NaN". This is the regression check for adversary New-H3 (IDLE elapsed-time NaN).
     - Test command: `cd app/client && npm test` exits 0 (no new tests required for Task 1 itself, but existing tests must continue to pass after the type widening).
     - Source assertion: `grep -n "WAITING_ON_PERMISSION" app/client/src/components/main-panel/session-card.tsx` returns at least one match (the status badge map).
     - Source assertion: `grep -n "All clear. Nothing needs you." app/client/src/components/main-panel/needs-you-pile.tsx` returns one match (verbatim empty-state string).
