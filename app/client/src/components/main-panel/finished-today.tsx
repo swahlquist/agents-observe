@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, CheckCircle2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SessionCard } from './session-card'
@@ -25,6 +25,21 @@ export function FinishedToday({
   forceOpen = false,
 }: FinishedTodayProps) {
   const [expanded, setExpanded] = useState(forceOpen)
+  // Sync to forceOpen flips after mount. `useState(forceOpen)` only
+  // honors the prop on the initial render, so a transition from
+  // "active sessions exist" to "all sessions finished today" leaves
+  // the section collapsed (CR-03) despite CONTEXT.md "Empty states"
+  // branch 3 specifying it should auto-expand. We only force-expand
+  // on a false-to-true flip; the user can still manually collapse it
+  // after, and a back-to-false flip is treated as "do nothing" so we
+  // don't fight the user's manual toggle.
+  const lastForceOpenRef = useRef(forceOpen)
+  useEffect(() => {
+    if (forceOpen !== lastForceOpenRef.current) {
+      lastForceOpenRef.current = forceOpen
+      if (forceOpen) setExpanded(true)
+    }
+  }, [forceOpen])
   const count = sessions.length
 
   if (count === 0) return null
