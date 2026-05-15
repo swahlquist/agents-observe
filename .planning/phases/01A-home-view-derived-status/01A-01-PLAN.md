@@ -8,6 +8,8 @@ files_modified:
   - app/server/src/routes/sessions.ts
   - app/server/src/lib/derive-status.ts
   - app/server/src/lib/derive-status.test.ts
+  - app/server/src/storage/types.ts
+  - app/server/src/storage/sqlite-adapter.ts
 autonomous: true
 requirements: [HOME-01, HOME-02, HOME-11, HOME-12, HOME-14, HOME-15]
 must_haves:
@@ -16,7 +18,7 @@ must_haves:
     - "GET /sessions/:id returns the same five derived fields"
     - "Status correctly classifies all six states (WORKING, WAITING_FOR_INPUT, WAITING_ON_PERMISSION, IDLE, FINISHED, ABANDONED) using real captured journal Notification messages"
     - "Server end-to-end response time stays under 50 ms for 30 sessions on the typical local SQLite database"
-    - "Derivation is O(N) over sessions (N <= 30) and O(M) over events per session (M <= 50). No full event-table scan"
+    - "Derivation is O(N) over sessions (N <= 30) and O(M) over events per session (M <= 50, newest-first via getRecentEventsForSession). No full event-table scan"
   artifacts:
     - path: "app/server/src/lib/derive-status.ts"
       provides: "Pure derivation function: deriveStatus(session, events, now)"
@@ -27,7 +29,7 @@ must_haves:
   key_links:
     - from: "app/server/src/routes/sessions.ts"
       to: "app/server/src/lib/derive-status.ts"
-      via: "rowToRecentSession import + per-row call after a bounded getEventsForSession lookup"
+      via: "rowToRecentSession import + per-row call after a bounded getRecentEventsForSession lookup (newest-first, LIMIT 50)"
       pattern: "deriveStatus\\("
 ---
 
@@ -120,8 +122,10 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
   </files>
   <read_first>
     - app/server/src/routes/sessions.ts (full file; focus the existing `deriveSessionStatus` at line 7 and `rowToRecentSession` at line 28; this plan replaces the former and extends the latter)
+    - app/server/src/storage/sqlite-adapter.ts lines 1042 to 1075 (existing `getEventsForSession`: note the `ORDER BY timestamp ASC` then `LIMIT`, which returns the OLDEST events. That is the wrong end for status derivation, which is why Task 2 adds a new sibling helper)
     - app/server/src/storage/sqlite-adapter.ts lines 1227 to 1253 (getRecentSessions SELECT; confirms `pending_notification_ts` is included via `s.*`)
-    - app/server/src/storage/types.ts lines 124 to 175 (EventStore interface; confirms `getEventsForSession(sessionId, filters)` accepts a `limit` filter)
+    - app/server/src/storage/sqlite-adapter.ts line 437 (index `idx_events_session_ts (session_id, timestamp)`: the compound index that serves both ASC and DESC scans of `WHERE session_id = ? ORDER BY timestamp <dir> LIMIT ?`)
+    - app/server/src/storage/types.ts lines 124 to 175 (EventStore interface; Task 2 ADDS a sibling method `getRecentEventsForSession(sessionId, limit)`. Do NOT modify the existing `getEventsForSession` signature; it has another caller at sessions.ts:132 that expects ASC ordering)
     - .planning/phases/01A-home-view-derived-status/01A-CONTEXT.md § "Status derivation rules" (regex chain, thresholds, why-text)
     - .planning/phases/01A-home-view-derived-status/01A-CONTEXT.md § "Performance plan" (1 + N query budget; do not refactor the SELECT)
     - hooks/scripts/lib/config.mjs (env var policy; this task adds no env reads)
@@ -131,7 +135,7 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
     - The status branches follow CONTEXT.md § "Status derivation rules" exactly: FINISHED when `stopped_at` is non-null; WAITING_ON_PERMISSION / WAITING_FOR_INPUT when `pending_notification_ts` is non-null (text-parsed); WORKING / IDLE / ABANDONED otherwise based on `last_activity` distance from `now` (60-second WORKING window, 30-minute ABANDONED cutoff).
     - The text parser uses the three-regex chain from CONTEXT.md § "Notification text parsing", applied in the order listed, against the most recent Notification event's `payload.message` field.
     - The `lastActionLabel` derivation walks the last 5 events backward (per CONTEXT.md § "lastActionLabel derivation"), first match wins, and truncates with single-character ellipsis (U+2026) at 60 characters.
-    - `rowToRecentSession` becomes async (or accepts a precomputed `derived` argument) and is invoked from a small helper that does the per-row event lookup. Update both `GET /sessions/recent` and `GET /sessions/:id` to perform: 1 query for rows, then for each row a `store.getEventsForSession(sessionId, { limit: 50 })` call, then `deriveStatus(row, events, Date.now())`, then merge the five new fields onto the response body. The existing `status` field (currently `"active" | "ended"` from `deriveSessionStatus(stoppedAt)`) is preserved by repurposing it: keep returning the same legacy string for clients that read it today, but additionally surface the new derived status under the same `status` key. Resolution: rename the legacy field on the wire is out of scope; CONTEXT.md and REQUIREMENTS.md both expect `status` to be the derived six-state value. Replace the legacy two-state `status` with the new six-state value, since the only consumers in this repo are the home-page and session list which Plan 02 rewrites.
+    - `rowToRecentSession` becomes async (or accepts a precomputed `derived` argument) and is invoked from a small helper that does the per-row event lookup. Update both `GET /sessions/recent` and `GET /sessions/:id` to perform: 1 query for rows, then for each row a `store.getRecentEventsForSession(row.id, 50)` call (the NEW helper added in Task 2; returns the newest 50 events via `ORDER BY timestamp DESC LIMIT ?`, not the oldest 50), then `deriveStatus(row, events, Date.now())`, then merge the five new fields onto the response body. The existing `status` field (currently `"active" | "ended"` from `deriveSessionStatus(stoppedAt)`) is preserved by repurposing it: keep returning the same legacy string for clients that read it today, but additionally surface the new derived status under the same `status` key. Resolution: rename the legacy field on the wire is out of scope; CONTEXT.md and REQUIREMENTS.md both expect `status` to be the derived six-state value. Replace the legacy two-state `status` with the new six-state value, since the only consumers in this repo are the home-page and session list which Plan 02 rewrites.
     - For `GET /sessions/:id`, also include the new fields on the response (HOME-01 requires both endpoints).
   </behavior>
   <action>
@@ -149,9 +153,13 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
 
     Implement `lastActionLabel` per CONTEXT.md § "lastActionLabel derivation". Truncate to 60 characters by replacing the 60th character with U+2026 (single-character ellipsis); do not emit three dots. Cap `statusDetail` at 64 characters for defense-in-depth against a degenerate fallback path.
 
-    Edit `app/server/src/routes/sessions.ts`. Delete the existing `deriveSessionStatus` function at line 7 (no other call sites remain after this change; confirm with grep). Import `deriveStatus` and `DerivedStatusFields` from `../lib/derive-status`. Convert the two route handlers (`GET /sessions/recent` and `GET /sessions/:id`) so each row's events are fetched via `await store.getEventsForSession(row.id, { limit: 50 })` and then `deriveStatus(row, events, Date.now())` produces the new fields, which are spread into the response object alongside the existing fields. The `rowToRecentSession` mapper takes a second argument: the derived block. Maintain field ordering: existing fields first, new fields last.
+    Add a new method `getRecentEventsForSession(sessionId: string, limit: number): Promise<StoredEvent[]>` to the `EventStore` interface in `app/server/src/storage/types.ts`, declared adjacent to the existing `getEventsForSession` (around line 161). Implement it in `app/server/src/storage/sqlite-adapter.ts` in the block adjacent to the existing `getEventsForSession` (after line 1075). The implementation is a single prepared statement: `SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?` returning `StoredEvent[]`. No filters; this is the fast newest-N lookup that backs status derivation. Reuse the existing compound index `idx_events_session_ts (session_id, timestamp)` (line 437); SQLite serves DESC scans of a compound index efficiently with no extra index needed.
 
-    For `GET /sessions/recent`, fetch events for all `rows` in a single loop (the SELECT in `getRecentSessions` already returns N <= 30, so this is N event-table lookups, each capped at 50 rows by index `idx_events_session_id` and `idx_events_session_timestamp`). Do not introduce a JOIN or a fan-out query rewrite; keep the existing SELECT untouched per CONTEXT.md § "Performance plan".
+    Do NOT modify the existing `getEventsForSession` method or its ASC ordering: the filtered timeline view at `routes/sessions.ts:132` depends on ASC plus pagination semantics. The new helper is additive.
+
+    Edit `app/server/src/routes/sessions.ts`. Delete the existing `deriveSessionStatus` function at line 7 (no other call sites remain after this change; confirm with grep). Import `deriveStatus` and `DerivedStatusFields` from `../lib/derive-status`. Convert the two route handlers (`GET /sessions/recent` and `GET /sessions/:id`) so each row's events are fetched via `await store.getRecentEventsForSession(row.id, 50)` and then `deriveStatus(row, events, Date.now())` produces the new fields, which are spread into the response object alongside the existing fields. The `rowToRecentSession` mapper takes a second argument: the derived block. Maintain field ordering: existing fields first, new fields last.
+
+    For `GET /sessions/recent`, fetch events for all `rows` in a single loop (the SELECT in `getRecentSessions` already returns N <= 30, so this is N event-table lookups, each capped at 50 rows by the compound index `idx_events_session_ts (session_id, timestamp)`, which serves `ORDER BY timestamp DESC LIMIT 50` via reverse scan). Do not introduce a JOIN or a fan-out query rewrite; keep the existing SELECT untouched per CONTEXT.md § "Performance plan".
 
     For `GET /sessions/:id`, do the same: one row, one events lookup, one `deriveStatus` call.
 
@@ -161,10 +169,14 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
   </action>
   <acceptance_criteria>
     - Source: `app/server/src/lib/derive-status.ts` exists and exports `deriveStatus`, `DerivedStatusFields`, `SessionStatus`.
-    - Source: `app/server/src/routes/sessions.ts` imports `deriveStatus` from `../lib/derive-status` and the obsolete `deriveSessionStatus` helper at the top of the file is removed.
+    - Source: `app/server/src/storage/types.ts` declares `getRecentEventsForSession(sessionId: string, limit: number): Promise<StoredEvent[]>` on the `EventStore` interface.
+    - Source: `app/server/src/storage/sqlite-adapter.ts` implements `getRecentEventsForSession` with a `SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?` prepared statement. Confirm via `grep -n "ORDER BY timestamp DESC" app/server/src/storage/sqlite-adapter.ts`.
+    - Source: `app/server/src/storage/sqlite-adapter.ts` `getEventsForSession` is untouched (still `ORDER BY timestamp ASC`); confirm via `git diff` that no lines inside the existing method body changed.
+    - Source: `app/server/src/routes/sessions.ts` imports `deriveStatus` from `../lib/derive-status` and the obsolete `deriveSessionStatus` helper at the top of the file is removed. Both route handlers call `store.getRecentEventsForSession(row.id, 50)` (NOT `getEventsForSession`); confirm via `grep -n "getRecentEventsForSession\|getEventsForSession" app/server/src/routes/sessions.ts` (expect 2 matches for the new helper and 1 unchanged match at line 132 for the existing filtered-timeline call).
     - Test command (from `app/server`): `npm test` exits 0; the file `derive-status.test.ts` from Task 1 now passes.
     - Behavior: a manual curl against `/api/sessions/recent` after the server restarts returns rows where every row has the keys `status`, `statusDetail`, `needsYou`, `lastActionLabel`, `lastActionAt`. (Manual sanity check; the test suite covers correctness.)
-    - Perf budget: derivation does not introduce any query beyond `1 + N` with N <= 30 and `limit: 50` per event lookup. Reviewer can `grep -n "getEventsForSession\|store\\." app/server/src/routes/sessions.ts` and confirm no scan-style queries appear in either route handler.
+    - Behavior: for a session with more than 50 events whose most recent event is a permission Notification, the returned `status` is `WAITING_ON_PERMISSION` and `lastActionLabel` reflects the most recent event (not the oldest event in the table). This is the regression check for C1: confirm a real DESC scan, not an ASC scan with the wrong end.
+    - Perf budget: derivation does not introduce any query beyond `1 + N` with N <= 30 and `LIMIT 50` per event lookup. Reviewer can `grep -n "getRecentEventsForSession\|store\\." app/server/src/routes/sessions.ts` and confirm no scan-style queries appear in either route handler.
     - No em dashes (U+2014) or double-hyphen ("--") runs in any string literal in `derive-status.ts` or in the new code added to `sessions.ts`.
   </acceptance_criteria>
   <verify>
@@ -189,7 +201,7 @@ Output: New helper `app/server/src/lib/derive-status.ts` plus colocated test fil
 | T-01A-01-01 | I | `statusDetail` string surfaced unsanitized to the client | mitigate | Cap `statusDetail` length at 64 characters in `derive-status.ts`. React JSX auto-escapes when Plan 02 renders it; no `dangerouslySetInnerHTML` is introduced. |
 | T-01A-01-02 | D | Regex chain over attacker-controlled Notification message text | accept | Hooks are local; an external attacker has no path to drive Notification text. Regex set is bounded (3 patterns, anchored on short prefixes, no catastrophic backtracking patterns). |
 | T-01A-01-03 | I | `lastActionLabel` could surface a long user prompt slice | mitigate | Truncate to 60 characters with single-character ellipsis per CONTEXT.md § "lastActionLabel derivation". |
-| T-01A-01-04 | D | Per-row `getEventsForSession` fan-out on `/sessions/recent` | mitigate | N is bounded to 30 by the SELECT in `getRecentSessions`; each lookup is `LIMIT 50` and indexed. Confirmed budget in CONTEXT.md § "Performance plan". |
+| T-01A-01-04 | D | Per-row `getRecentEventsForSession` fan-out on `/sessions/recent` | mitigate | N is bounded to 30 by the SELECT in `getRecentSessions`; each lookup is `LIMIT 50` and indexed by `idx_events_session_ts (session_id, timestamp)`, which serves the `ORDER BY timestamp DESC LIMIT 50` plan via reverse scan. Confirmed budget in CONTEXT.md § "Performance plan". |
 | T-01A-01-05 | T | Storage layer rewriting the legacy `status` field shape | accept | The only in-repo consumers (sidebar, home page) are rewritten in Plan 02 to consume the new six-state value. External consumers (none in this milestone) are not in scope. |
 </threat_model>
 

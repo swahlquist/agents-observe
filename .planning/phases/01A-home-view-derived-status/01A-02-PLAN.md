@@ -15,6 +15,7 @@ files_modified:
   - app/client/src/hooks/use-bell.test.ts
   - app/client/src/hooks/use-tab-title.ts
   - app/client/src/hooks/use-tab-title.test.ts
+  - app/client/src/hooks/use-websocket.ts
   - app/client/src/stores/ui-store.ts
   - app/client/src/types/index.ts
 autonomous: true
@@ -213,11 +214,14 @@ Output: Four new presentational components, two new side-effect hooks, a new `be
   <files>
     - app/client/src/components/main-panel/home-page.tsx (rewrite)
     - app/client/src/components/main-panel/main-panel.tsx (extend `SessionView` with tabs and URL query state)
+    - app/client/src/hooks/use-websocket.ts (wire `notification` and `notification_clear` WS messages into the `['recent-sessions']` cache so `needsYouCount` flips reactively)
   </files>
   <read_first>
     - app/client/src/components/main-panel/home-page.tsx (current implementation; being replaced)
     - app/client/src/components/main-panel/main-panel.tsx (current `SessionView` at lines 40 to 59; the existing body becomes the Activity tab content)
     - app/client/src/hooks/use-recent-sessions.ts (single payload hook; do NOT split into a second hook; extend the response type via Task 1 instead)
+    - app/client/src/hooks/use-websocket.ts lines 147 to 204 (current message handler. The `session_update` branch at line 147 invalidates `['recent-sessions']` (line 153); the `notification` branch at line 174 and `notification_clear` branch at line 180 do NOT. Task 3 adds the missing invalidations so the home page's `needsYouCount` flips reactively when a real permission notification arrives. Without this, the bell and tab-title side effects never fire on the path they were designed for.)
+    - app/server/src/routes/events.ts lines 268 to 282 (server emits `type: 'notification'` when `pendingTransition === 'set'` and `type: 'notification_clear'` when `pendingTransition === 'cleared'`. These are the WS messages whose handlers Task 3 modifies. Transitions only fire on actual false-to-true or true-to-false changes, so invalidation frequency stays bounded.)
     - app/client/src/components/main-panel/overlap-banner.tsx (kept verbatim above the Needs You pile per CONTEXT.md § "Sections and ordering")
     - app/client/src/components/main-panel/external-tasks-panel.tsx (moves to the bottom of the home page per HOME-07)
     - .planning/phases/01A-home-view-derived-status/01A-CONTEXT.md § "Sections and ordering" (layout order, project group sort, Finished today, Notion Today, Overlap banner)
@@ -235,12 +239,15 @@ Output: Four new presentational components, two new side-effect hooks, a new `be
     - The home page computes the single-client-mode boolean: `hideClientBadge = new Set(sessions.flatMap(s => s.agentClasses)).size <= 1`. Passes this down to each section component.
     - The home page invokes `useTabTitle(needsYouCount, topSessionIntent)` unconditionally on every render. `needsYouCount` = count of sessions with `needsYou === true`. `topSessionIntent` = the intent of the highest-sorted needsYou session (the one rendered first in the pile), or `null` if none.
     - The home page invokes `useBell(needsYouCount)` (the hook itself short-circuits on `bellEnabled === false`).
+    - The WebSocket message handler in `use-websocket.ts` invalidates the `['recent-sessions']` query on both `type: 'notification'` and `type: 'notification_clear'` server broadcasts. Without this, the server flips `pending_notification_ts` and broadcasts the notification, but the home page's TanStack Query cache for `['recent-sessions']` does not refetch, so `needsYou` stays false in the rendered data and `useBell` and `useTabTitle` never observe the flip. This is the wire-level fix that makes HOME-08 and HOME-09 fire on a real notification arrival. The existing `pushNotification` and `clearNotification` calls in those branches stay; the new behavior is purely additive (one extra invalidation line per branch, mirroring the existing `session_update` pattern at line 153).
     - Group sessions by `projectId`. Sessions with `projectId === null` are placed under a synthetic "Unassigned" group with `projectName: "Unassigned"`. Inside a group, separate active from finished-today by status: status === FINISHED with stoppedAt after local midnight goes to that group's `finishedTodaySessions`; everything else with status !== FINISHED goes to `activeSessions`. (Finished sessions older than local midnight go to a global "older" bucket that is dropped from the home view; the 30-session window already trims them.)
     - SessionView (in `main-panel.tsx`) gets a tab strip above the existing content. Two tabs: "Overview" (default) and "Activity". The Activity tab body is the current `SessionView` content unchanged (`ScopeBar`, `EventFilterBar`, `ActivityTimeline`, `EventStream`). The Overview tab body is a thin placeholder per CONTEXT.md § "SessionView tabs": a card listing `intent` (read-only display in 1a), `lastActionLabel`, status badge, and the verbatim note `"Tasks: arriving in Phase 1b"`.
     - Tab state is held in the URL query string under `?tab=overview` or `?tab=activity`. On mount, the component reads `new URLSearchParams(window.location.search).get('tab')` and defaults to `'overview'` if missing or unrecognized. On tab change, the component writes the new value via `window.history.replaceState` (no full navigation; preserve the existing hash-based session routing).
     - The `SessionBreadcrumb` stays above the tab strip; the breadcrumb is shared chrome, not part of either tab's body.
   </behavior>
   <action>
+    Edit `app/client/src/hooks/use-websocket.ts`. In `handleMessage` (the `useCallback` starting around line 110), locate the `else if (msg.type === 'notification')` branch (around line 174) and add `queryClient.invalidateQueries({ queryKey: ['recent-sessions'] })` as the first line of the branch body, before the existing `pushNotification(...)` call. Do the same in the `else if (msg.type === 'notification_clear')` branch (around line 180), invalidating the same query before the existing `clearNotification(...)` call. These additions mirror the existing `session_update` handler's invalidation pattern (line 153). No new tests required (the existing WS handler has no unit-test coverage today; the integration is covered by the manual smoke step in the verification block below). If a trace log line is desired for parity with the surrounding branches, follow the existing `if (logLevel === 'trace') console.debug(...)` shape; otherwise omit.
+
     Rewrite `app/client/src/components/main-panel/home-page.tsx`. Drop the `Recent Sessions` heading, the sort toggle, and the `SessionList` body. Keep `useRecentSessions(30)` as the only data hook (Plan 01 ships the new fields on the same query). Compute the four section inputs (`needsYouSessions`, `projectGroups`, `finishedTodaySessions`, the empty-state branch) with `useMemo` keyed on the query data.
 
     Use `useTabTitle(needsYouCount, topSessionIntent)` and `useBell(needsYouCount)` at the top of the component body. Both must run on every render so the false-to-true flip detection works correctly (the hooks themselves manage refs internally).
@@ -260,6 +267,7 @@ Output: Four new presentational components, two new side-effect hooks, a new `be
     - `app/client/src/components/main-panel/home-page.tsx` invokes `useTabTitle` and `useBell` at the top of `HomePage`.
     - `app/client/src/components/main-panel/main-panel.tsx` imports tabs primitives from `@/components/ui/tabs` and the `SessionView` body wraps the timeline content in a `<TabsContent value="activity">`.
     - `app/client/src/components/main-panel/main-panel.tsx` reads the initial tab from `window.location.search` and writes back via `window.history.replaceState`.
+    - `app/client/src/hooks/use-websocket.ts` invalidates `['recent-sessions']` inside both the `notification` and `notification_clear` branches of `handleMessage`. Verify via `grep -n "recent-sessions" app/client/src/hooks/use-websocket.ts`: expect at least three matches (existing `session_update` invalidation at line 153, plus two new invalidations in the `notification` and `notification_clear` branches). Confirm via `grep -nB1 "invalidateQueries.*recent-sessions" app/client/src/hooks/use-websocket.ts` that each invalidation sits inside the correct `msg.type === ...` branch, not at the top of the handler.
     - The three empty-state strings appear verbatim in the source: `grep -n "No sessions yet. Run a Claude Code or Gemini CLI command to see it here." app/client/src/components/main-panel/home-page.tsx` returns one match; same for `"All quiet. Nothing active."`.
     - Test command: `cd app/client && npm test` exits 0. The existing `main-panel.test.tsx` is updated to assert the Overview tab renders by default and switching to Activity renders the timeline body. If the existing test cannot be adapted in this plan, add a follow-up smoke test in `main-panel.test.tsx` that exercises the tab toggle.
     - Repo-level: `just check` exits 0.
@@ -297,7 +305,7 @@ Output: Four new presentational components, two new side-effect hooks, a new `be
 - `cd app/server && npm test` exits 0 (must remain green; Plan 01 work should not regress).
 - `just check` from repo root exits 0 (runs all tests + Prettier).
 - Manual smoke (HOME-14 glance test): open `http://localhost:4981`, confirm the four-section layout renders in the correct order, the Notion Today panel appears at the bottom, and an active session is identifiable in under 2 seconds without clicking.
-- Manual smoke (HOME-08 + HOME-09): trigger a `Notification` event from a real Claude Code session; the browser tab title updates within 1 second to `(1) <intent> · agents-observe` and the bell plays once. Toggle the bell off via the new UI store path; trigger another notification; confirm the title still updates but no bell plays.
+- Manual smoke (HOME-08 + HOME-09): trigger a `Notification` event from a real Claude Code session; the browser tab title updates within 1 second to `(1) <intent> · agents-observe` and the bell plays once. Toggle the bell off via the new UI store path; trigger another notification; confirm the title still updates but no bell plays. Open Chrome DevTools Network tab and confirm a `GET /api/sessions/recent` refetch fires within ~200 ms of the WS `notification` frame arriving (visible in the WS tab as `{"type":"notification",...}`). The refetch is the cache-invalidation signal landing; if it is missing, the `useBell` + `useTabTitle` flips will not fire and HOME-08/HOME-09 are silently broken regardless of unit-test results.
 - Manual smoke (HOME-10): navigate to a session, confirm the URL gains `?tab=overview` (or stays at that value if absent). Switch to Activity, reload the page; confirm the URL still says `?tab=activity` and the timeline renders.
 - Manual parity check (HOME-15): run `~/ai-company-brain/scripts/today-summary.sh` and compare its active-and-awaiting list against the home view side by side. They should agree.
 </verification>
