@@ -323,6 +323,76 @@ describe('deriveStatus', () => {
       expect(result.derivedStatus).toBe<SessionStatus>('WORKING')
     })
   })
+
+  describe('event ordering robustness (WR-03 / WR-04)', () => {
+    it('classifies a permission notification correctly when events arrive in ASC order', () => {
+      // Pre-WR-03 the autodetect would reverse this and pickLastAction
+      // would pull from the wrong end. Now we sort defensively.
+      const session = makeSession({ pending_notification_ts: NOW - 1_000 })
+      const eventsAsc = [
+        makeEvent('SessionStart', NOW - 10_000, {}),
+        makeEvent('BeforeTool', NOW - 5_000, { tool_name: 'Read' }),
+        makeEvent('Notification', NOW - 1_000, {
+          message: 'Claude needs your permission to use Edit',
+        }),
+      ]
+      const result = deriveStatus(session, eventsAsc, NOW)
+      expect(result.derivedStatus).toBe<SessionStatus>('WAITING_ON_PERMISSION')
+      expect(result.statusDetail).toBe('Edit')
+      expect(result.lastActionLabel).toBe('Waiting on Edit permission')
+    })
+
+    it('classifies correctly when events share one timestamp (no spurious reversal, WR-03)', () => {
+      // Pre-WR-03: lastTs >= firstTs is true when all timestamps are
+      // equal, so the array got reversed and "newest" became whichever
+      // element happened to land at the end. With identical timestamps
+      // the storage ORDER BY DESC tie-breaks by insertion order, so the
+      // first row IS the newest from the DB's perspective. We preserve
+      // that: pickLastAction reads element 0 after a stable sort.
+      const session = makeSession({ pending_notification_ts: NOW - 1_000 })
+      const sharedTs = NOW - 1_000
+      // DESC order with a tie: Notification first (the actual newest
+      // per the DB), then older events also at the same ms.
+      const events = [
+        makeEvent('Notification', sharedTs, {
+          message: 'Claude needs your permission to use Bash',
+        }),
+        makeEvent('BeforeTool', sharedTs, { tool_name: 'Read' }),
+        makeEvent('BeforeTool', sharedTs, { tool_name: 'Grep' }),
+      ]
+      const result = deriveStatus(session, events, NOW)
+      expect(result.derivedStatus).toBe<SessionStatus>('WAITING_ON_PERMISSION')
+      expect(result.statusDetail).toBe('Bash')
+    })
+
+    it('pickLastAction and findMostRecentNotification agree on "newest" (WR-04)', () => {
+      // With a mixed-order array, pre-WR-04 the two functions could
+      // pick different events as "newest." Now they both consume the
+      // same sorted view, so the lastActionLabel and statusDetail
+      // reference the same Notification.
+      const session = makeSession({ pending_notification_ts: NOW - 1_000 })
+      const events = [
+        // Mixed order on purpose: older Notification first.
+        makeEvent('Notification', NOW - 30_000, {
+          message: 'Claude needs your permission to use Read',
+        }),
+        makeEvent('AfterTool', NOW - 20_000, { tool_name: 'Read' }),
+        makeEvent('Notification', NOW - 1_000, {
+          message: 'Claude needs your permission to use Bash',
+        }),
+        makeEvent('BeforeTool', NOW - 10_000, { tool_name: 'Bash' }),
+      ]
+      const result = deriveStatus(session, events, NOW)
+      // Newest Notification wins for status detail.
+      expect(result.derivedStatus).toBe<SessionStatus>('WAITING_ON_PERMISSION')
+      expect(result.statusDetail).toBe('Bash')
+      // lastActionLabel comes from the newest event (the same
+      // Notification), not from the older Notification or the
+      // mid-array tool events.
+      expect(result.lastActionLabel).toBe('Waiting on Bash permission')
+      expect(result.lastActionAt).toBe(NOW - 1_000)
+    })
+  })
 })
 
 describe('coerceWireLastActivity (Round 3 New-H mitigation)', () => {

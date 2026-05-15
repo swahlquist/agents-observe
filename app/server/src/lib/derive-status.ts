@@ -206,28 +206,36 @@ function eventToLabel(event: EventRow): { label: string; at: number } | null {
 }
 
 /**
+ * Sort events newest-first by timestamp. Used by both `pickLastAction`
+ * and `findMostRecentNotification` so they cannot disagree about which
+ * event is newest (WR-03 / WR-04).
+ *
+ * Pre-WR-03, `pickLastAction` autodetected ASC vs DESC via
+ * `lastTs >= firstTs`. When every event in the batch shared one
+ * timestamp (a burst recorded at the same ms), the check returned true
+ * and the array was reversed, flipping correctly-ordered DESC data on
+ * its head. `findMostRecentNotification` used a linear-scan max which
+ * was correct regardless of order, so the two functions could disagree
+ * about "newest." Sort defensively once and feed both branches; events
+ * is bounded at 50 so the sort is free.
+ */
+function sortEventsDescByTimestamp(events: EventRow[]): EventRow[] {
+  return events
+    .slice()
+    .sort((a, b) => (b.timestamp ?? -Infinity) - (a.timestamp ?? -Infinity))
+}
+
+/**
  * Walk events newest-first and return the first label-producing event.
  * Looks at the last 5 events; matches CONTEXT.md § "lastActionLabel
- * derivation" semantics. Accepts events in either ASC or DESC order;
- * if `events[0].timestamp <= events[events.length - 1].timestamp`,
- * the array is treated as ASC and walked backward. Otherwise it's
- * treated as DESC and walked forward.
+ * derivation" semantics. Requires events in DESC order (caller's
+ * responsibility); use `sortEventsDescByTimestamp` defensively if you
+ * cannot guarantee ordering.
  */
 function pickLastAction(events: EventRow[]): { label: string; at: number } | null {
   if (events.length === 0) return null
-  const len = events.length
-  const ordered = events.slice()
-  // Detect order. If the last element is newer-than-or-equal-to the
-  // first, the array is ASC; we want newest-first, so reverse.
-  if (len > 1) {
-    const firstTs = ordered[0].timestamp ?? 0
-    const lastTs = ordered[len - 1].timestamp ?? 0
-    if (lastTs >= firstTs) {
-      ordered.reverse()
-    }
-  }
   // Look at the last 5 (i.e. first 5 of the newest-first slice).
-  const window = ordered.slice(0, 5)
+  const window = events.slice(0, 5)
   for (const ev of window) {
     const result = eventToLabel(ev)
     if (result) return result
@@ -236,22 +244,15 @@ function pickLastAction(events: EventRow[]): { label: string; at: number } | nul
 }
 
 /**
- * Find the most recent Notification event in the (possibly mixed-
- * order) events array. Returns null if none. Accepts either ASC or
- * DESC ordering; the function normalizes internally.
+ * Find the most recent Notification event in the events array.
+ * Requires DESC order (caller's responsibility); returns the first
+ * Notification encountered.
  */
 function findMostRecentNotification(events: EventRow[]): EventRow | null {
-  let best: EventRow | null = null
-  let bestTs = -Infinity
   for (const ev of events) {
-    if (ev.hook_name !== 'Notification') continue
-    const ts = ev.timestamp ?? -Infinity
-    if (ts > bestTs) {
-      bestTs = ts
-      best = ev
-    }
+    if (ev.hook_name === 'Notification') return ev
   }
-  return best
+  return null
 }
 
 /**
@@ -263,7 +264,12 @@ export function deriveStatus(
   events: EventRow[],
   now: number,
 ): DerivedStatusFields {
-  const lastAction = pickLastAction(events)
+  // Sort once defensively (WR-03 / WR-04) so pickLastAction and
+  // findMostRecentNotification can never disagree about "newest."
+  // events is bounded at 50 by the caller (RECENT_EVENTS_PER_SESSION),
+  // so the sort cost is negligible.
+  const orderedEvents = sortEventsDescByTimestamp(events)
+  const lastAction = pickLastAction(orderedEvents)
   const lastActionLabel = lastAction?.label ?? null
   const lastActionAt = lastAction?.at ?? null
 
@@ -280,7 +286,7 @@ export function deriveStatus(
 
   // 2. Pending notification flag is canonical.
   if (session.pending_notification_ts) {
-    const mostRecentNotification = findMostRecentNotification(events)
+    const mostRecentNotification = findMostRecentNotification(orderedEvents)
     if (!mostRecentNotification) {
       // Fallback 5 (H6 mitigation): flag set, no Notification in the
       // fetched window. Default to WAITING_FOR_INPUT; trust the flag.
