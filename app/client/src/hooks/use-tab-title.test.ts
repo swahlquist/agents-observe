@@ -61,10 +61,24 @@ describe('useTabTitle', () => {
     expect(document.title).toBe('agents-observe')
   })
 
-  it('resets to the base title on unmount', () => {
+  it('preserves the last-written title on unmount (CR-01: indicator persists across HomePage remounts)', () => {
+    // Per CR-01: cleanup must NOT wipe the indicator. When HomePage
+    // unmounts (e.g. user navigates into a project) the tab title
+    // should still reflect any pending needsYou count so the user has
+    // a visible signal that sessions still need attention.
     const { unmount } = renderHook(() => useTabTitle(2, 'something'))
-    expect(document.title).toContain('sessions need you')
+    expect(document.title).toBe('(2) sessions need you · agents-observe')
     unmount()
+    expect(document.title).toBe('(2) sessions need you · agents-observe')
+  })
+
+  it('writes BASE_TITLE explicitly when count is 0 (count-zero branch is the reset path)', () => {
+    const { rerender } = renderHook(
+      ({ n, intent }: { n: number; intent: string | null }) => useTabTitle(n, intent),
+      { initialProps: { n: 3, intent: null as string | null } },
+    )
+    expect(document.title).toBe('(3) sessions need you · agents-observe')
+    rerender({ n: 0, intent: null })
     expect(document.title).toBe('agents-observe')
   })
 })

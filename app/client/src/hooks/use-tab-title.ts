@@ -15,7 +15,17 @@ const MIDDLE_DOT = '·'
  * - count > 1         : "(<count>) sessions need you · agents-observe"
  *
  * Unconditional per CONTEXT.md (the bell has a mute toggle; the tab
- * title does not). Resets to the base title on unmount.
+ * title does not).
+ *
+ * No cleanup function: React invokes the cleanup not only on unmount
+ * but between every dependency-change run, which would briefly flash
+ * the base title on every count/intent change. On unmount we want the
+ * indicator to persist (the user navigates into a project but sessions
+ * still need them; the tab indicator is the only signal). The next
+ * effect run writes the correct title; the count-zero branch above
+ * writes BASE_TITLE explicitly when everything is clear. A global
+ * title reset on app teardown, if ever needed, belongs at the app root.
+ * See CR-01 in the Phase 01A code review.
  */
 export function useTabTitle(needsYouCount: number, topSessionIntent: string | null): void {
   useEffect(() => {
@@ -29,8 +39,5 @@ export function useTabTitle(needsYouCount: number, topSessionIntent: string | nu
       nextTitle = `(${needsYouCount}) sessions need you ${MIDDLE_DOT} ${BASE_TITLE}`
     }
     document.title = nextTitle
-    return () => {
-      document.title = BASE_TITLE
-    }
   }, [needsYouCount, topSessionIntent])
 }
