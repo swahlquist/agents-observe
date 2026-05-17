@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v0.9.5
 milestone_name: milestone
-current_phase: 01A
-status: phase_complete_soaking
-last_updated: "2026-05-15T22:35:00.000Z"
+current_phase: 01B
+status: context_captured
+last_updated: "2026-05-16T16:30:00.000Z"
 progress:
   total_phases: 2
   completed_phases: 1
@@ -35,8 +35,8 @@ progress:
 | Phase 1a execute | Done (2026-05-15), server + client merged to main, 879 tests passing |
 | Phase 1a code review | Done (2026-05-15), 15 findings, 10 fixed (3 BLOCKER + 7 WARNING), 5 INFO deferred |
 | Phase 1a soak | In progress (2026-05-15 to 2026-05-16) |
-| Phase 1b discuss | Pending: soak gate + visual-refresh decision |
-| Phase 1b plan | Pending |
+| Phase 1b discuss | Done (2026-05-16, auto-decide mode), see 01B-CONTEXT.md + 01B-DISCUSSION-LOG.md |
+| Phase 1b plan | Pending: run `/gsd-plan-phase 1b` next |
 | Phase 1b execute | Pending |
 
 ## Phase Memory
